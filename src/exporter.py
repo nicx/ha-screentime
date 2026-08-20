@@ -1,0 +1,422 @@
+#!/usr/bin/env python3
+"""
+Apple Screen Time Exporter - Exporter
+Exports data to Home Assistant and InfluxDB
+"""
+
+import csv
+import json
+import os
+import sys
+import requests
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from collections import defaultdict
+from dotenv import load_dotenv
+
+from config import CATEGORIES, TITLE_NORMALIZE, get_category
+
+# Load .env from parent directory
+load_dotenv(Path(__file__).parent.parent / ".env")
+
+# --- CONFIGURATION ---
+SCRIPT_DIR = Path(__file__).parent.parent
+
+# Home Assistant
+HA_URL = os.getenv("HA_URL", "http://homeassistant.local:8123")
+HA_TOKEN = os.getenv("HA_TOKEN", "")
+
+# InfluxDB
+INFLUX_URL = os.getenv("INFLUX_URL", "http://localhost:8086")
+INFLUX_TOKEN = os.getenv("INFLUX_TOKEN", "")
+INFLUX_ORG = os.getenv("INFLUX_ORG", "home")
+INFLUX_BUCKET = os.getenv("INFLUX_BUCKET", "screentime")
+
+# Paths (s. collector.py: per Env überschreibbar für den Betrieb im App-Bundle)
+DATA_DIR = Path(os.getenv("SCREENTIME_DATA_DIR") or (SCRIPT_DIR / "data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+CSV_FILE = DATA_DIR / "screentime.csv"
+LAST_EXPORT_FILE = DATA_DIR / ".last_export_timestamp"
+
+# Maschinenlesbarer Stand des letzten Laufs. Die Menüleisten-App liest das
+# statt stdout zu parsen (Anzeige, Schwellwert-Alarm, Tageszusammenfassung).
+STATUS_FILE = DATA_DIR / "status.json"
+
+
+def write_status(aggregates: dict) -> None:
+    """Schreibt den aktuellen Tagesstand für die App."""
+    try:
+        payload = dict(aggregates)
+        payload["updated_at"] = datetime.now().astimezone().isoformat()
+        payload["date"] = datetime.now().date().isoformat()
+        STATUS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    except Exception as e:
+        print(f"[Status] Could not write {STATUS_FILE}: {e}")
+
+
+def get_last_export_timestamp() -> float:
+    """Reads the last export timestamp."""
+    if LAST_EXPORT_FILE.exists():
+        try:
+            return float(LAST_EXPORT_FILE.read_text().strip())
+        except:
+            pass
+    return 0.0
+
+
+def save_last_export_timestamp(ts: float):
+    """Saves the last export timestamp."""
+    LAST_EXPORT_FILE.write_text(str(ts))
+
+
+def load_data(since_timestamp: float = 0) -> list[dict]:
+    """
+    Loads the CSV and filters for new data.
+
+    Bewusst ohne pandas: die App bündelt ihre eigene Python-Runtime, und
+    pandas/numpy wären die mit Abstand schwersten nativen Abhängigkeiten
+    (Bundle-Größe + Signierung). Die Aggregation hier ist simpel genug.
+
+    Returns: Liste von Zeilen-Dicts mit zusätzlich
+             'dt' (datetime, UTC), 'unix_ts' (int), 'category' (str).
+    """
+    if not CSV_FILE.exists():
+        print(f"CSV not found: {CSV_FILE}")
+        return []
+
+    rows: list[dict] = []
+    with CSV_FILE.open(newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            ts = (row.get("timestamp") or "").strip()
+            if not ts:
+                continue
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+
+            unix_ts = int(dt.timestamp())
+            if since_timestamp > 0 and unix_ts <= since_timestamp:
+                continue
+
+            try:
+                duration = float(row.get("duration") or 0.0)
+            except ValueError:
+                duration = 0.0
+
+            # Normalize titles (long App Store names -> short)
+            title = row.get("title") or "Unknown"
+            title = TITLE_NORMALIZE.get(title, title)
+
+            row["dt"] = dt
+            row["unix_ts"] = unix_ts
+            row["duration"] = duration
+            row["title"] = title
+            row["category"] = get_category(title)
+            rows.append(row)
+
+    return rows
+
+
+def export_to_influxdb(rows: list[dict]) -> bool:
+    """
+    Writes raw data to InfluxDB in Line Protocol format.
+
+    Schema:
+      screentime,source=iphone,app=com.google.Chrome,title=Chrome,category=browser duration=45.5 1707400000000000000
+    """
+    if not rows:
+        print("[InfluxDB] No data to export")
+        return True
+
+    if not INFLUX_TOKEN:
+        print("[InfluxDB] INFLUX_TOKEN not set - skipping")
+        return False
+
+    lines = []
+    for row in rows:
+        # Escape special characters in tag values
+        source = row["source"].replace(" ", "\\ ").replace(",", "\\,")
+        app = row["app"].replace(" ", "\\ ").replace(",", "\\,").replace("=", "\\=")
+        title = row["title"].replace(" ", "\\ ").replace(",", "\\,").replace("=", "\\=")
+        category = row["category"].replace(" ", "\\ ").replace(",", "\\,")
+
+        # Timestamp in nanoseconds
+        ts_ns = int(row["dt"].timestamp() * 1e9)
+
+        line = f'screentime,source={source},app={app},title={title},category={category} duration={row["duration"]} {ts_ns}'
+        lines.append(line)
+
+    # Batch write
+    data = "\n".join(lines)
+
+    try:
+        response = requests.post(
+            f"{INFLUX_URL}/api/v2/write",
+            params={"org": INFLUX_ORG, "bucket": INFLUX_BUCKET, "precision": "ns"},
+            headers={
+                "Authorization": f"Token {INFLUX_TOKEN}",
+                "Content-Type": "text/plain; charset=utf-8"
+            },
+            data=data.encode('utf-8'),
+            timeout=30
+        )
+
+        if response.status_code == 204:
+            print(f"[InfluxDB] {len(lines)} data points written")
+            return True
+        else:
+            print(f"[InfluxDB] Error {response.status_code}: {response.text[:200]}")
+            return False
+
+    except Exception as e:
+        print(f"[InfluxDB] Connection error: {e}")
+        return False
+
+
+def calculate_daily_aggregates(rows: list[dict], target_date=None) -> dict:
+    """
+    Calculates daily aggregates for Home Assistant sensors.
+
+    Returns:
+        {
+            "total_minutes": 245.5,
+            "by_device": {"iPhone": 180.0, "Mac": 65.5, ...},
+            "top_app": "Chrome",
+            "top_app_minutes": 45.0,
+            "by_category": {"social": 90, "productivity": 60, ...},
+            "by_app": {"Chrome": 45, "Discord": 30, ...},
+            "session_count": 150,
+        }
+    """
+    if target_date is None:
+        target_date = datetime.now().date()
+
+    # Filter for target day. Die Zeitstempel sind UTC; für die Tagesgrenze
+    # zählt die lokale Zeit, sonst landen Abendstunden im falschen Tag.
+    day_rows = [r for r in rows if r["dt"].astimezone().date() == target_date]
+    if not day_rows:
+        return None
+
+    def sum_by(key: str) -> dict:
+        out: dict[str, float] = defaultdict(float)
+        for r in day_rows:
+            out[r.get(key) or "Unknown"] += r["duration"]
+        return dict(out)
+
+    total_seconds = sum(r["duration"] for r in day_rows)
+
+    by_device = {k: round(v / 60, 1) for k, v in sum_by("source").items()}
+    by_category = {k: round(v / 60, 1) for k, v in sum_by("category").items()}
+
+    app_totals = sorted(sum_by("title").items(), key=lambda kv: kv[1], reverse=True)
+    top_app, top_app_seconds = app_totals[0] if app_totals else ("Unknown", 0.0)
+    by_app = {k: round(v / 60, 1) for k, v in app_totals[:10]}
+
+    return {
+        "total_minutes": round(total_seconds / 60, 1),
+        "by_device": by_device,
+        "top_app": top_app,
+        "top_app_minutes": round(top_app_seconds / 60, 1),
+        "by_category": by_category,
+        "by_app": by_app,
+        "session_count": len(day_rows),
+    }
+
+
+def update_ha_sensor(entity_id: str, state: any, attributes: dict = None, unit: str = None):
+    """Updates a Home Assistant sensor via REST API."""
+    if not HA_TOKEN:
+        print(f"[HA] HA_TOKEN not set - skipping {entity_id}")
+        return False
+
+    url = f"{HA_URL}/api/states/{entity_id}"
+
+    payload = {
+        "state": state,
+        "attributes": attributes or {}
+    }
+
+    if unit:
+        payload["attributes"]["unit_of_measurement"] = unit
+
+    payload["attributes"]["state_class"] = "measurement"
+    payload["attributes"]["last_updated"] = datetime.now().isoformat()
+
+    try:
+        response = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {HA_TOKEN}",
+                "Content-Type": "application/json"
+            },
+            json=payload,
+            timeout=10
+        )
+
+        if response.status_code in [200, 201]:
+            print(f"[HA] {entity_id} = {state}")
+            return True
+        else:
+            print(f"[HA] Error {response.status_code} for {entity_id}: {response.text[:100]}")
+            return False
+
+    except Exception as e:
+        print(f"[HA] Connection error: {e}")
+        return False
+
+
+def export_to_homeassistant(rows: list[dict]) -> bool:
+    """Aktualisiert alle Sensoren. Rückgabe: True nur, wenn ALLE Pushes klappten."""
+    """Exports daily aggregates as Home Assistant sensors."""
+    if not HA_TOKEN:
+        print("[HA] HA_TOKEN not set - skipping Home Assistant export")
+        return False
+
+    today = datetime.now().date()
+    aggregates = calculate_daily_aggregates(rows, today)
+
+    if not aggregates:
+        # Kein Eintrag für heute (z.B. kurz nach Mitternacht): bewusst Nullen
+        # senden statt abzubrechen — sonst stünden die Werte von GESTERN
+        # weiter als "heute" in HA.
+        print("[HA] No data for today yet - resetting sensors to 0")
+        aggregates = {
+            "total_minutes": 0.0,
+            "by_device": {},
+            "top_app": "-",
+            "top_app_minutes": 0.0,
+            "by_category": {},
+            "by_app": {},
+            "session_count": 0,
+        }
+
+    # Base sensors
+    sensors = [
+        ("sensor.screentime_total", aggregates["total_minutes"], "min", {
+            "friendly_name": "Screen Time Total",
+            "icon": "mdi:cellphone-screen",
+            "session_count": aggregates["session_count"],
+        }),
+        ("sensor.screentime_top_app", aggregates["top_app"], None, {
+            "friendly_name": "Top App Today",
+            "icon": "mdi:trophy",
+            "minutes": aggregates["top_app_minutes"],
+        }),
+    ]
+
+    # Per-device sensors: ALLE konfigurierten Geräte melden, auch ungenutzte.
+    # Sonst verschwindet die Entity an Tagen ohne Nutzung und reißt Lücken
+    # in Dashboard und Verlauf.
+    by_device = dict(aggregates["by_device"])
+    for entry in os.getenv("DEVICES", "").split(","):
+        entry = entry.strip()
+        if ":" in entry:
+            configured_name = entry.split(":", 1)[0].strip()
+            by_device.setdefault(configured_name, 0.0)
+
+    for device_name, minutes in by_device.items():
+        # Create entity_id from device name (e.g., "iPhone 15 Pro" -> "screentime_iphone_15_pro")
+        entity_suffix = device_name.lower().replace(" ", "_").replace("-", "_")
+        entity_id = f"sensor.screentime_{entity_suffix}"
+
+        # Choose icon based on device type
+        if "mac" in device_name.lower():
+            icon = "mdi:laptop"
+        elif "ipad" in device_name.lower():
+            icon = "mdi:tablet"
+        else:
+            icon = "mdi:cellphone"
+
+        sensors.append((entity_id, minutes, "min", {
+            "friendly_name": f"Screen Time {device_name}",
+            "icon": icon,
+        }))
+
+    ok = True
+    for entity_id, state, unit, attrs in sensors:
+        ok = update_ha_sensor(entity_id, state, attrs, unit) and ok
+
+    # Category sensor with all values as attributes
+    ok = update_ha_sensor(
+        "sensor.screentime_by_category",
+        aggregates["by_category"].get("Social", 0),
+        {
+            "friendly_name": "Screen Time by Category",
+            "icon": "mdi:chart-pie",
+            **{f"category_{k}": v for k, v in aggregates["by_category"].items()}
+        },
+        "min"
+    ) and ok
+
+    # Top apps as attributes
+    ok = update_ha_sensor(
+        "sensor.screentime_top_apps",
+        len(aggregates["by_app"]),
+        {
+            "friendly_name": "Screen Time Top Apps",
+            "icon": "mdi:format-list-numbered",
+            **aggregates["by_app"]
+        },
+        "apps"
+    ) and ok
+
+    write_status(aggregates)
+    return ok
+
+
+def main():
+    print(f"=== Screen Time Export - {datetime.now().isoformat()} ===\n")
+
+    # Load last export timestamp
+    last_export = get_last_export_timestamp()
+    if last_export > 0:
+        print(f"Last export: {datetime.fromtimestamp(last_export).isoformat()}")
+    else:
+        print("First export - all data will be exported")
+
+    # Load data
+    rows = load_data(since_timestamp=last_export)
+    print(f"Loaded data: {len(rows)} new entries")
+
+    # Bewusst KEIN vorzeitiges Ende bei "keine neuen Daten": die Tageswerte in
+    # Home Assistant müssen auch dann stimmen, wenn nichts dazugekommen ist —
+    # sonst stünde nach Mitternacht weiter der Stand von gestern als "heute".
+    if not rows:
+        print("Keine neuen Daten – Tageswerte werden trotzdem aktualisiert.")
+
+    # Export to InfluxDB (raw data)
+    influx_success = True
+    if rows:
+        print("\n--- InfluxDB Export ---")
+        influx_success = export_to_influxdb(rows)
+
+    # Export to Home Assistant (aggregates)
+    print("\n--- Home Assistant Export ---")
+    # For HA we need all data from today, not just new
+    rows_full = load_data(since_timestamp=0)
+    ha_ok = export_to_homeassistant(rows_full)
+
+    # Save last timestamp.
+    # Ohne InfluxDB (unser Fall) darf der Merker nicht am Influx-Ergebnis hängen,
+    # sonst wird bei jedem Lauf die komplette CSV neu verarbeitet.
+    # Ist InfluxDB konfiguriert, bleibt das Retry-Verhalten erhalten.
+    influx_enabled = bool(os.getenv("INFLUX_TOKEN"))
+    if rows and (influx_success or not influx_enabled):
+        max_ts = max(r["unix_ts"] for r in rows)
+        save_last_export_timestamp(max_ts)
+        print(f"\nExport completed. Last timestamp: {datetime.fromtimestamp(max_ts).isoformat()}")
+
+    # Exit-Code, damit die App einen kaputten HA-Export (Netz weg, Token
+    # abgelaufen) als Fehler erkennt statt ihn nur ins Log zu schreiben.
+    if not ha_ok:
+        print("\n[HA] Export unvollständig – siehe Meldungen oben.")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

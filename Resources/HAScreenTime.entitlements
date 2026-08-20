@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Nicht sandboxed: die App startet die gebündelte CPython-Runtime als
+         Kindprozess, liest die Screen-Time-Daten aus ~/Library/Biome (dafür
+         braucht der App-Binary Festplattenvollzugriff) und schreibt ihren
+         Datenbestand nach ~/Library/HAScreenTime. -->
+
+    <!-- disable-library-validation ist zwingend: die Hardened Runtime würde
+         sonst die per pip installierten, fremd signierten C-Extensions
+         (.so-Dateien in der eingebetteten Runtime) nicht laden. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
