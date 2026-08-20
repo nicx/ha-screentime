@@ -81,19 +81,22 @@ Sitzungen abmeldet und alle Dienste des Haupt-Benutzers mitreißt.
 2. `/Applications/HAScreenTime.app` starten.
 3. Festplattenvollzugriff für die App erteilen (ohne den kommt sie nicht an `~/Library/Biome`),
    danach App neu starten.
-4. In den Einstellungen: HA-URL + Long-Lived-Token, Geräte (`Name:UUID,…`), Mail-Empfänger.
+4. In den Einstellungen: HA-URL + Long-Lived-Token, dann **„Geräte suchen"** und die
+   gewünschten Geräte übernehmen, Mail-Empfänger eintragen.
 5. „Bei der Anmeldung starten“ aktivieren.
 
-Geräte-IDs ermitteln: `bash devices.sh` (Full Disk Access nötig) listet alle
-synchronisierten Geräte samt Top-Apps — daran erkennt man, welches Gerät wem gehört.
-
 ## Diagnose
+
+Die Geräte-IDs findet man am einfachsten in der App selbst: **Einstellungen → Geräte →
+„Geräte suchen"** listet alle synchronisierten Geräte mit ihren meistgenutzten Apps —
+daran erkennt man, welches Gerät wem gehört, denn Apples Gerätenamen sind meist leer.
+
+Für die Fehlersuche außerhalb der App (im Home des Hauptbenutzers, Full Disk Access nötig):
 
 | Skript | Zweck |
 |---|---|
 | `diagnose.sh` | Prüft iCloud-Login, Biome-Streams, knowledgeC — Grundvoraussetzungen |
-| `devices.sh` | Listet alle Geräte je Plattform samt Top-Apps |
-| `deploy.sh` | Kopiert die Diagnose-Skripte nach `/Users/Shared/ha-screentime` |
+| `devices.sh` | Wie „Geräte suchen", aber als Shell-Skript |
 
 Achtung `aw-import-screentime`: Der Default ist `--platform 2` (iPhone). Ein iPad ist
 **platform 1** und liefert ohne den passenden Schalter stillschweigend null Events —

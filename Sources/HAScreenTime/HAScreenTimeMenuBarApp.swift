@@ -9,6 +9,7 @@ final class AppEnvironment: ObservableObject {
     let loginItem: LoginItemManager
     let notifier: Notifier
     let runner: ExportRunner
+    let scanner: DeviceScanner
 
     init() {
         let settings = AppSettings()
@@ -20,6 +21,7 @@ final class AppEnvironment: ObservableObject {
         self.loginItem = LoginItemManager()
         self.notifier = notifier
         self.runner = ExportRunner(settings: settings, log: log, notifier: notifier)
+        self.scanner = DeviceScanner(settings: settings)
     }
 
     func bootstrap() {
@@ -79,6 +81,7 @@ struct HAScreenTimeMenuBarApp: App {
                 .environmentObject(env.settings)
                 .environmentObject(env.runner)
                 .environmentObject(env.loginItem)
+                .environmentObject(env.scanner)
         }
 
         Window("Screen Time Logs", id: "logs") {

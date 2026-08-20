@@ -4,6 +4,7 @@ struct SettingsView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var runner: ExportRunner
     @EnvironmentObject private var loginItem: LoginItemManager
+    @EnvironmentObject private var scanner: DeviceScanner
 
     @State private var mailTestResult: String?
 
@@ -64,8 +65,47 @@ struct SettingsView: View {
             }
 
             Section("Geräte-IDs ermitteln") {
-                Text("Die IDs stammen aus der Biome-Synchronisation. Im Zweifel liefert `devices.sh` im Projektordner eine Liste aller Geräte samt ihrer Top-Apps.")
-                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button("Geräte suchen") {
+                        Task { await scanner.scan() }
+                    }
+                    .disabled(scanner.isScanning)
+                    if scanner.isScanning {
+                        ProgressView().controlSize(.small)
+                        Text("suche…").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+
+                if let err = scanner.error {
+                    Text(err).font(.caption).foregroundStyle(.red)
+                }
+
+                if !scanner.devices.isEmpty {
+                    Text("Die Gerätenamen sind bei Apple meist leer — erkennbar sind die Geräte an ihren Apps.")
+                        .font(.caption).foregroundStyle(.secondary)
+
+                    ForEach(scanner.devices) { device in
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack {
+                                Text("\(device.platformName) · \(device.events) Ereignisse")
+                                    .font(.callout)
+                                Spacer()
+                                Button("Übernehmen") { add(device) }
+                                    .disabled(settings.devices.contains(device.deviceId))
+                            }
+                            if !device.topAppsSummary.isEmpty {
+                                Text(device.topAppsSummary)
+                                    .font(.caption).foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                            Text(device.deviceId)
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                                .textSelection(.enabled)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
             }
         }
         .formStyle(.grouped)
@@ -113,6 +153,16 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// Ein gefundenes Gerät in die Konfiguration übernehmen. Der Name ist ein
+    /// Vorschlag (z.B. "iPhone") und bestimmt die Entity-ID in Home Assistant —
+    /// er lässt sich im Textfeld darüber anpassen.
+    private func add(_ device: ScannedDevice) {
+        let name = device.platformName
+        let entry = "\(name):\(device.deviceId)"
+        let current = settings.devices.trimmingCharacters(in: .whitespacesAndNewlines)
+        settings.devices = current.isEmpty ? entry : current + "," + entry
     }
 
     private func sendTestMail() {
