@@ -104,10 +104,27 @@ Achtung `aw-import-screentime`: Der Default ist `--platform 2` (iPhone). Ein iPa
 
 ## Sensoren
 
-`sensor.screentime_total`, `sensor.screentime_<gerät>`, `sensor.screentime_top_app`,
-`sensor.screentime_by_category`, `sensor.screentime_top_apps` — Minuten des laufenden
-Tages, Aufschlüsselung in den Attributen. Über `state_class: measurement` führt HA
-Langzeitstatistiken, der Verlauf überlebt also die `purge_keep_days` des Recorders.
+| Entity | Inhalt |
+|---|---|
+| `sensor.screentime_total` | Minuten heute, gesamt |
+| `sensor.screentime_<gerät>` | Minuten heute je konfiguriertem Gerät |
+| `sensor.screentime_top_app` | meistgenutzte App (Minuten als Attribut) |
+| `sensor.screentime_cat_<kategorie>` | Minuten heute je Kategorie, immer alle |
+| `sensor.screentime_app_<app>` | Minuten heute je beobachteter App |
+| `sensor.screentime_by_category` | Sammelsensor, alle Kategorien als Attribute |
+| `sensor.screentime_top_apps` | Sammelsensor, Top 10 Apps als Attribute |
+
+Kategorie-Sensoren entstehen automatisch aus der Kategorienliste in `src/config.py` und
+werden **immer alle** gesendet, auch mit 0 Minuten — sonst verschwindet die Entity an
+ruhigen Tagen und reißt Lücken in Verlauf und Statistik.
+
+App-Sensoren gibt es nur für eine **Beobachtungsliste** (Einstellungen → Geräte). Bewusst
+nicht für jede gesehene App: über Wochen kämen hunderte Entities zusammen, die ständig
+auftauchen und verschwinden, und würden den Recorder aufblähen.
+
+Über `state_class: measurement` führt HA Langzeitstatistiken, der Verlauf überlebt also
+die `purge_keep_days` des Recorders. `Scripts/add-dashboard-cards.py` legt passende
+Lovelace-Karten an (Details, Kategorien, beobachtete Apps, Tagesbalken).
 
 Die Werte werden per `/api/states` gesetzt und überleben einen **HA-Neustart nicht** —
 beim nächsten Lauf der App sind sie wieder da (max. ein Intervall Lücke).

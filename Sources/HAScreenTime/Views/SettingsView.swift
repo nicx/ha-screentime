@@ -58,6 +58,25 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
 
+            Section("Eigene Sensoren für einzelne Apps") {
+                TextField("Beobachtete Apps", text: $settings.watchedApps, axis: .vertical)
+                    .lineLimit(2...5)
+                Text("Kommagetrennt, z. B. „YouTube, ChatGPT“. Jede bekommt einen eigenen Sensor (sensor.screentime_app_youtube) — auch an Tagen mit 0 Minuten, damit der Verlauf keine Lücken bekommt. Kategorien bekommen automatisch eigene Sensoren.")
+                    .font(.caption).foregroundStyle(.secondary)
+
+                if let status = runner.status, !status.byApp.isEmpty {
+                    Text("Zuletzt gesehen — zum Hinzufügen klicken:")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        ForEach(status.byApp.sorted(by: { $0.value > $1.value }).prefix(5), id: \.key) { name, _ in
+                            Button(name) { watch(name) }
+                                .buttonStyle(.link)
+                                .disabled(settings.watchedApps.contains(name))
+                        }
+                    }
+                }
+            }
+
             Section("Dieser Mac") {
                 Toggle("Nutzung dieses Macs mitzählen", isOn: $settings.collectMac)
                 Text("Standard aus: dieser Mac sammelt nur, seine eigene „Nutzung“ sind Wartungssitzungen und würde die Werte verfälschen.")
@@ -163,6 +182,12 @@ struct SettingsView: View {
         let entry = "\(name):\(device.deviceId)"
         let current = settings.devices.trimmingCharacters(in: .whitespacesAndNewlines)
         settings.devices = current.isEmpty ? entry : current + "," + entry
+    }
+
+    /// Eine App in die Beobachtungsliste aufnehmen.
+    private func watch(_ name: String) {
+        let current = settings.watchedApps.trimmingCharacters(in: .whitespacesAndNewlines)
+        settings.watchedApps = current.isEmpty ? name : current + ", " + name
     }
 
     private func sendTestMail() {

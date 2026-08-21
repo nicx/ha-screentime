@@ -31,12 +31,8 @@ struct LogView: View {
                 Text("\(log.lines.count) Zeilen")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Button("In Konsole öffnen") {
-                    NSWorkspace.shared.open(
-                        [log.logFileURL],
-                        withAppBundleIdentifier: "com.apple.Console",
-                        options: [], additionalEventParamDescriptor: nil,
-                        launchIdentifiers: nil)
+                Button("Im Finder zeigen") {
+                    NSWorkspace.shared.activateFileViewerSelecting([log.logFileURL])
                 }
                 Button("Leeren") { log.clear() }
             }

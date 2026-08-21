@@ -19,6 +19,12 @@ final class AppSettings: ObservableObject {
     /// des Python-Teils, wird unverändert durchgereicht.
     @AppStorage("devices") var devices: String = ""
 
+    /// Apps, die eigene Sensoren bekommen (kommagetrennt, Anzeigenamen wie in
+    /// den Top-Apps). Bewusst eine feste Auswahl statt "jede gesehene App":
+    /// sonst sammeln sich über die Wochen hunderte Entities an, die kommen und
+    /// gehen, und blähen den Recorder auf.
+    @AppStorage("watchedApps") var watchedApps: String = ""
+
     /// Nutzung des Macs mitzählen, auf dem gesammelt wird. Standard aus: dieser
     /// Mac ist nur Sammelstelle, seine „Nutzung“ sind Wartungssitzungen.
     @AppStorage("collectMac") var collectMac: Bool = false
@@ -69,6 +75,7 @@ final class AppSettings: ObservableObject {
         env["HA_TOKEN"] = haToken.trimmingCharacters(in: .whitespaces)
         env["DEVICES"] = devices.trimmingCharacters(in: .whitespaces)
         env["COLLECT_MAC"] = collectMac ? "true" : "false"
+        env["WATCHED_APPS"] = watchedApps.trimmingCharacters(in: .whitespaces)
         env["SCREENTIME_DATA_DIR"] = BundledRuntime.dataDirectory.path
         env["SCREENTIME_AW_BIN"] = BundledRuntime.awBinaryURL.path
         // Ausgabe ungepuffert, damit das Log live mitläuft statt am Ende zu klumpen.

@@ -44,6 +44,42 @@ LAST_EXPORT_FILE = DATA_DIR / ".last_export_timestamp"
 STATUS_FILE = DATA_DIR / "status.json"
 
 
+CATEGORY_ICONS = {
+    "AI": "mdi:robot",
+    "Browser": "mdi:web",
+    "Communication": "mdi:message-text",
+    "Finance": "mdi:bank",
+    "Games": "mdi:gamepad-variant",
+    "Media": "mdi:play-circle",
+    "Other": "mdi:dots-horizontal",
+    "Productivity": "mdi:briefcase",
+    "School": "mdi:school",
+    "Shopping": "mdi:cart",
+    "Social": "mdi:account-group",
+    "System": "mdi:cog",
+    "Utilities": "mdi:tools",
+}
+
+
+def slugify(name: str) -> str:
+    """App-/Kategoriename -> Entity-ID-tauglicher Bestandteil."""
+    out = "".join(c.lower() if c.isalnum() else "_" for c in name)
+    while "__" in out:
+        out = out.replace("__", "_")
+    return out.strip("_") or "unknown"
+
+
+def known_categories() -> list[str]:
+    """Alle Kategorien, die vorkommen können — inkl. der Auffangwerte."""
+    return sorted(set(CATEGORIES.values()) | {"Other", "System"})
+
+
+def watched_apps() -> list[str]:
+    """Apps, die eigene Sensoren bekommen (kommagetrennt aus WATCHED_APPS)."""
+    raw = os.getenv("WATCHED_APPS", "")
+    return [a.strip() for a in raw.split(",") if a.strip()]
+
+
 def write_status(aggregates: dict) -> None:
     """Schreibt den aktuellen Tagesstand für die App."""
     try:
@@ -215,6 +251,9 @@ def calculate_daily_aggregates(rows: list[dict], target_date=None) -> dict:
     app_totals = sorted(sum_by("title").items(), key=lambda kv: kv[1], reverse=True)
     top_app, top_app_seconds = app_totals[0] if app_totals else ("Unknown", 0.0)
     by_app = {k: round(v / 60, 1) for k, v in app_totals[:10]}
+    # Vollständig, nicht nur Top 10: eine beobachtete App kann außerhalb der
+    # Top 10 liegen und stünde sonst fälschlich auf 0.
+    by_app_all = {k: round(v / 60, 1) for k, v in app_totals}
 
     return {
         "total_minutes": round(total_seconds / 60, 1),
@@ -223,6 +262,7 @@ def calculate_daily_aggregates(rows: list[dict], target_date=None) -> dict:
         "top_app_minutes": round(top_app_seconds / 60, 1),
         "by_category": by_category,
         "by_app": by_app,
+        "by_app_all": by_app_all,
         "session_count": len(day_rows),
     }
 
@@ -291,6 +331,7 @@ def export_to_homeassistant(rows: list[dict]) -> bool:
             "top_app_minutes": 0.0,
             "by_category": {},
             "by_app": {},
+            "by_app_all": {},
             "session_count": 0,
         }
 
@@ -363,6 +404,39 @@ def export_to_homeassistant(rows: list[dict]) -> bool:
         },
         "apps"
     ) and ok
+
+    # --- Einzelsensoren pro Kategorie ---
+    # Bewusst IMMER alle bekannten Kategorien senden, auch mit 0 Minuten: sonst
+    # verschwindet die Entity an ruhigen Tagen und reißt Lücken in Verlauf und
+    # Langzeitstatistik.
+    for category in known_categories():
+        minutes = aggregates["by_category"].get(category, 0.0)
+        ok = update_ha_sensor(
+            f"sensor.screentime_cat_{slugify(category)}",
+            minutes,
+            {
+                "friendly_name": f"Screen Time {category}",
+                "icon": CATEGORY_ICONS.get(category, "mdi:shape"),
+            },
+            "min"
+        ) and ok
+
+    # --- Einzelsensoren für beobachtete Apps ---
+    # Nur eine feste Auswahl statt "jede gesehene App": sonst sammeln sich über
+    # die Wochen hunderte Entities an, die kommen und gehen, und blähen den
+    # Recorder auf. Die Beobachtungsliste hat stabile IDs und lückenlose Historie.
+    by_app_all = aggregates.get("by_app_all", aggregates["by_app"])
+    for app in watched_apps():
+        minutes = by_app_all.get(app, 0.0)
+        ok = update_ha_sensor(
+            f"sensor.screentime_app_{slugify(app)}",
+            minutes,
+            {
+                "friendly_name": f"Screen Time {app}",
+                "icon": "mdi:application",
+            },
+            "min"
+        ) and ok
 
     write_status(aggregates)
     return ok

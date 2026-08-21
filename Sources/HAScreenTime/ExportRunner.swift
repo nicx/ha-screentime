@@ -36,8 +36,8 @@ enum RunState: Equatable {
 /// Status aus und löst die Benachrichtigungen aus.
 ///
 /// Anders als bei den Schwester-Apps läuft hier kein langlebiger Serverprozess,
-/// sondern ein kurzer Job pro Intervall — deshalb Timer + `Process` statt
-/// Prozessüberwachung mit Neustart.
+/// sondern ein kurzer Job pro Intervall — deshalb ein Scheduler + `Process`
+/// statt Prozessüberwachung mit Neustart.
 @MainActor
 final class ExportRunner: ObservableObject {
 
@@ -50,7 +50,8 @@ final class ExportRunner: ObservableObject {
     private let log: LogStore
     private let notifier: Notifier
 
-    private var timer: Timer?
+    private var scheduler: NSBackgroundActivityScheduler?
+    private var activityToken: NSObjectProtocol?
     private var isRunning = false
 
     /// Verhindert, dass Schwellwert-/Tagesmail mehrfach am selben Tag rausgeht.
@@ -66,27 +67,53 @@ final class ExportRunner: ObservableObject {
 
     // MARK: - Zeitplan
 
+    /// Startet den periodischen Lauf.
+    ///
+    /// Bewusst `NSBackgroundActivityScheduler` statt eines `Timer` auf der
+    /// Main-Runloop: Die App ist eine Hintergrund-App (`LSUIElement`) und läuft
+    /// in einer Benutzersitzung, die nicht die aktive Konsolensitzung ist.
+    /// macOS drosselt solche Prozesse per App Nap — ein Timer feuert dann
+    /// schlicht nicht mehr (in der Praxis: nach dem Start-Lauf kam über Stunden
+    /// kein einziger weiterer). Der Scheduler ist genau für periodische
+    /// Hintergrundarbeit gedacht und weckt die App dafür auf; zusätzlich melden
+    /// wir laufende Aktivität an, damit wir gar nicht erst eingeschläfert werden.
     func startScheduling() {
-        timer?.invalidate()
+        stopScheduling()
+
+        // Verhindert App Nap, erlaubt dem Mac aber weiterhin, selbst zu schlafen.
+        activityToken = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiatedAllowingIdleSystemSleep],
+            reason: "Screen-Time-Export im Zeitplan")
+
         let interval = TimeInterval(max(1, settings.intervalMinutes) * 60)
-        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.runOnce(trigger: "Timer") }
-        }
+        let s = NSBackgroundActivityScheduler(identifier: "de.nicx.hascreentime.export")
+        s.repeats = true
+        s.interval = interval
         // Toleranz schont die Energieverwaltung; der genaue Zeitpunkt ist egal.
-        t.tolerance = interval * 0.1
-        RunLoop.main.add(t, forMode: .default)
-        timer = t
+        s.tolerance = interval * 0.1
+        s.qualityOfService = .utility
+        s.schedule { [weak self] completion in
+            Task { @MainActor in
+                await self?.runOnce(trigger: "Zeitplan")
+                completion(.finished)
+            }
+        }
+        scheduler = s
         log.appendSystem("Zeitplan aktiv: alle \(settings.intervalMinutes) Minuten")
     }
 
     func stopScheduling() {
-        timer?.invalidate()
-        timer = nil
+        scheduler?.invalidate()
+        scheduler = nil
+        if let token = activityToken {
+            ProcessInfo.processInfo.endActivity(token)
+            activityToken = nil
+        }
     }
 
     /// Nach Änderung des Intervalls neu aufsetzen.
     func rescheduleIfNeeded() {
-        guard timer != nil else { return }
+        guard scheduler != nil else { return }
         startScheduling()
     }
 
