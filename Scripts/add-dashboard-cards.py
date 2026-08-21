@@ -40,19 +40,30 @@ WATCHED_SENSORS = [
 # Die Attribut-Schlüssel, die keine App bzw. Kategorie sind.
 SKIP = "['friendly_name','icon','unit_of_measurement','state_class','last_updated','device_class']"
 
-MARKDOWN = f"""## Heute: {{{{ states('sensor.screentime_total') }}}} min
+# Robust gegen fehlende Entities: die Sensoren werden per /api/states gesetzt
+# und sind nach einem HA-Neustart kurzzeitig weg -- ohne Guard wirft die Karte
+# dann im Minutentakt Template-Fehler ins Log.
+MARKDOWN = """## Heute: {{ states('sensor.screentime_total') }} min
 
+{% set apps = state_attr('sensor.screentime_top_apps', 'friendly_name') %}
+{%- if apps is none %}
+_Noch keine Daten -- der nächste Lauf füllt die Werte._
+{%- else %}
 **Top-Apps**
-{{%- set a = states.sensor.screentime_top_apps.attributes %}}
-{{%- for k, v in a.items() | sort(attribute='1', reverse=true) if k not in {SKIP} %}}
-- {{{{ k }}}}: {{{{ v }}}} min
-{{%- endfor %}}
+{%- set a = states.sensor.screentime_top_apps.attributes %}
+{%- set skip = ['friendly_name','icon','unit_of_measurement','state_class','last_updated','device_class','minutes'] %}
+{%- for item in (a.items() | rejectattr('0','in', skip) | list | sort(attribute='1', reverse=true)) %}
+- {{ item[0] }}: {{ item[1] }} min
+{%- endfor %}
 
 **Kategorien**
-{{%- set c = states.sensor.screentime_by_category.attributes %}}
-{{%- for k, v in c.items() | sort(attribute='1', reverse=true) if k.startswith('category_') and v > 0 %}}
-- {{{{ k | replace('category_', '') }}}}: {{{{ v }}}} min
-{{%- endfor %}}
+{%- set c = states.sensor.screentime_by_category.attributes %}
+{%- for item in (c.items() | selectattr('0','match','category_') | list | sort(attribute='1', reverse=true)) %}
+{%- if item[1] > 0 %}
+- {{ item[0] | replace('category_', '') }}: {{ item[1] }} min
+{%- endif %}
+{%- endfor %}
+{%- endif %}
 """
 
 NEW_CARDS = [
@@ -77,7 +88,7 @@ NEW_CARDS = [
         "chart_type": "bar",
         "period": "day",
         "days_to_show": 30,
-        "stat_types": ["max"],
+        "stat_types": ["sum"],
         "entities": ["sensor.screentime_total"],
     },
 ]

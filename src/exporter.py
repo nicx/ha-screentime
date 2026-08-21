@@ -44,6 +44,22 @@ LAST_EXPORT_FILE = DATA_DIR / ".last_export_timestamp"
 STATUS_FILE = DATA_DIR / "status.json"
 
 
+CATEGORY_LABELS = {
+    "AI": "KI",
+    "Browser": "Browser",
+    "Communication": "Kommunikation",
+    "Finance": "Finanzen",
+    "Games": "Spiele",
+    "Media": "Medien",
+    "Other": "Sonstiges",
+    "Productivity": "Produktivität",
+    "School": "Schule",
+    "Shopping": "Einkaufen",
+    "Social": "Social Media",
+    "System": "System",
+    "Utilities": "Werkzeuge",
+}
+
 CATEGORY_ICONS = {
     "AI": "mdi:robot",
     "Browser": "mdi:web",
@@ -267,7 +283,8 @@ def calculate_daily_aggregates(rows: list[dict], target_date=None) -> dict:
     }
 
 
-def update_ha_sensor(entity_id: str, state: any, attributes: dict = None, unit: str = None):
+def update_ha_sensor(entity_id: str, state: any, attributes: dict = None,
+                     unit: str = None, state_class: str | None = "total_increasing"):
     """Updates a Home Assistant sensor via REST API."""
     if not HA_TOKEN:
         print(f"[HA] HA_TOKEN not set - skipping {entity_id}")
@@ -283,7 +300,14 @@ def update_ha_sensor(entity_id: str, state: any, attributes: dict = None, unit: 
     if unit:
         payload["attributes"]["unit_of_measurement"] = unit
 
-    payload["attributes"]["state_class"] = "measurement"
+    # state_class nur bei numerischen Sensoren: sonst versucht HA aus einem
+    # App-NAMEN Statistik zu rechnen und meckert.
+    # "total_increasing" statt "measurement": der Wert ist eine Tagessumme, die
+    # um Mitternacht auf 0 zurückfällt. HA erkennt den Rücksprung als Reset und
+    # rechnet die Tageswerte korrekt -- "max pro Tag" würde dagegen den Wert
+    # mitnehmen, der nach Mitternacht bis zum ersten Lauf noch stehenbleibt.
+    if state_class:
+        payload["attributes"]["state_class"] = state_class
     payload["attributes"]["last_updated"] = datetime.now().isoformat()
 
     try:
@@ -338,12 +362,12 @@ def export_to_homeassistant(rows: list[dict]) -> bool:
     # Base sensors
     sensors = [
         ("sensor.screentime_total", aggregates["total_minutes"], "min", {
-            "friendly_name": "Screen Time Total",
+            "friendly_name": "Bildschirmzeit gesamt",
             "icon": "mdi:cellphone-screen",
             "session_count": aggregates["session_count"],
         }),
         ("sensor.screentime_top_app", aggregates["top_app"], None, {
-            "friendly_name": "Top App Today",
+            "friendly_name": "Bildschirmzeit Top-App",
             "icon": "mdi:trophy",
             "minutes": aggregates["top_app_minutes"],
         }),
@@ -373,24 +397,27 @@ def export_to_homeassistant(rows: list[dict]) -> bool:
             icon = "mdi:cellphone"
 
         sensors.append((entity_id, minutes, "min", {
-            "friendly_name": f"Screen Time {device_name}",
+            "friendly_name": f"Bildschirmzeit {device_name}",
             "icon": icon,
         }))
 
     ok = True
     for entity_id, state, unit, attrs in sensors:
-        ok = update_ha_sensor(entity_id, state, attrs, unit) and ok
+        # Der Top-App-Sensor hält einen App-NAMEN, keine Zahl -> keine Statistik.
+        sc = None if entity_id.endswith("_top_app") else "total_increasing"
+        ok = update_ha_sensor(entity_id, state, attrs, unit, state_class=sc) and ok
 
     # Category sensor with all values as attributes
     ok = update_ha_sensor(
         "sensor.screentime_by_category",
         aggregates["by_category"].get("Social", 0),
         {
-            "friendly_name": "Screen Time by Category",
+            "friendly_name": "Bildschirmzeit Kategorien (Übersicht)",
             "icon": "mdi:chart-pie",
             **{f"category_{k}": v for k, v in aggregates["by_category"].items()}
         },
-        "min"
+        "min",
+        state_class=None
     ) and ok
 
     # Top apps as attributes
@@ -398,11 +425,12 @@ def export_to_homeassistant(rows: list[dict]) -> bool:
         "sensor.screentime_top_apps",
         len(aggregates["by_app"]),
         {
-            "friendly_name": "Screen Time Top Apps",
+            "friendly_name": "Bildschirmzeit Top-Apps (Übersicht)",
             "icon": "mdi:format-list-numbered",
             **aggregates["by_app"]
         },
-        "apps"
+        "apps",
+        state_class=None
     ) and ok
 
     # --- Einzelsensoren pro Kategorie ---
@@ -415,7 +443,7 @@ def export_to_homeassistant(rows: list[dict]) -> bool:
             f"sensor.screentime_cat_{slugify(category)}",
             minutes,
             {
-                "friendly_name": f"Screen Time {category}",
+                "friendly_name": f"Bildschirmzeit {CATEGORY_LABELS.get(category, category)}",
                 "icon": CATEGORY_ICONS.get(category, "mdi:shape"),
             },
             "min"
@@ -432,7 +460,7 @@ def export_to_homeassistant(rows: list[dict]) -> bool:
             f"sensor.screentime_app_{slugify(app)}",
             minutes,
             {
-                "friendly_name": f"Screen Time {app}",
+                "friendly_name": f"Bildschirmzeit {app}",
                 "icon": "mdi:application",
             },
             "min"
