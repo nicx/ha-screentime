@@ -60,7 +60,10 @@ echo "    Interpreter: $("$PY" -c 'import platform,sys; print(platform.python_ve
 echo "==> Installiere Abhängigkeiten in die Runtime"
 # --no-cache-dir hält das Bundle frei von pip-Cache-Resten.
 "$PY" -m pip install --quiet --no-cache-dir --upgrade pip
-"$PY" -m pip install --quiet --no-cache-dir requests python-dotenv
+# websockets: HAs Schnittstelle zum nachtraeglichen Einspielen von Statistiken
+# (recorder/import_statistics) gibt es NUR ueber WebSocket, nicht per REST.
+# Reines Python, daher kein zusaetzlicher nativer Ballast im Bundle.
+"$PY" -m pip install --quiet --no-cache-dir requests python-dotenv websockets
 
 # aw-import-screentime liegt als Unterordner im Repo (SEGB/Biome-Parser).
 if [[ ! -d "$ROOT/aw-import-screentime" ]]; then

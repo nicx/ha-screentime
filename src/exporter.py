@@ -74,7 +74,9 @@ def export_diagnostics() -> None:
             attrs[f"{name} — Fehler"] = " | ".join(info["stderr"])[:250]
     # Fremde Geraete-IDs mit auflisten, damit eine geaenderte ID auffaellt.
     for i, d in enumerate((diag.get("devices_seen") or [])[:12], 1):
-        attrs[f"Biome {i}"] = f"platform {d.get('platform')} · {d.get('id')} · {d.get('last_sync')}"
+        newest = d.get("newest_event")
+        extra = f" · juengstes Ereignis {newest}" if newest else ""
+        attrs[f"Biome {i}"] = (f"platform {d.get('platform')} · sync {d.get('last_sync')}{extra}")
 
     stale = any((i.get("newest_event_age_hours") or 0) > 24
                 for i in (diag.get("devices") or {}).values())

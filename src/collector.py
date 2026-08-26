@@ -64,6 +64,36 @@ def list_sync_db_devices() -> list[dict]:
         return []
 
 
+def probe_newest_event(device_id: str, platform: int) -> str | None:
+    """
+    Juengstes Ereignis eines beliebigen Biome-Geraets.
+
+    Dient der Abgrenzung: liefern ANDERE Geraete am selben Konto noch frische
+    Daten, liegt eine Stoerung an den konfigurierten Geraeten. Sind auch die
+    anderen veraltet, empfaengt dieser Mac gar nichts mehr.
+    """
+    if not AW_BIN.exists():
+        return None
+    cmd = [str(AW_BIN), "events", "preview", "--device", device_id,
+           "--platform", str(platform), "--since", "28d"]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if out.returncode != 0:
+            return None
+        newest = None
+        for entry in json.loads(out.stdout or "[]"):
+            for ev in entry.get("events", []):
+                try:
+                    dt = datetime.fromisoformat(ev["timestamp"].replace("Z", "+00:00"))
+                except Exception:
+                    continue
+                if newest is None or dt > newest:
+                    newest = dt
+        return newest.astimezone().isoformat(timespec="seconds") if newest else None
+    except Exception:
+        return None
+
+
 def write_diagnostics() -> None:
     try:
         DIAG["written_at"] = datetime.now().astimezone().isoformat()
@@ -406,8 +436,23 @@ if __name__ == "__main__":
         if sync_ok and not entry["in_sync_db"]:
             entry["status"] = "Geraete-ID steht nicht mehr in Biomes Geraeteliste"
 
+    # Nur im Stoerungsfall die uebrigen Geraete mitpruefen -- im Normalbetrieb
+    # waere das unnoetige Last bei jedem Lauf.
+    stale = any((i.get("newest_event_age_hours") or 0) > 24
+                for i in DIAG["devices"].values())
+    if stale and sync_ok:
+        print("[Diag] Konfigurierte Geraete veraltet -- pruefe die uebrigen Geraete…")
+        configured_ids = {dev_id for _, dev_id in devices}
+        for entry in DIAG["devices_seen"]:
+            if entry["id"] in configured_ids or entry.get("me"):
+                continue
+            entry["newest_event"] = probe_newest_event(entry["id"], entry.get("platform") or 2)
+
     print()
     print(f"[Diag] sync.db: {DIAG['sync_db']} | Geraete in Biome: {len(seen)}")
+    for e in DIAG["devices_seen"]:
+        if e.get("newest_event"):
+            print(f"[Diag]   platform {e.get('platform')}: juengstes Ereignis {e['newest_event']}")
     for name, info in DIAG["devices"].items():
         print(f"[Diag] {name}: {info.get('status')} "
               f"(28d={info.get('events_total_28d')}, neu={info.get('events_new')}, "

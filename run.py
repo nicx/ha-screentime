@@ -47,14 +47,20 @@ def main():
     # Step 2: Export
     export_ok = run_script("exporter.py", "Exporting to Home Assistant")
 
+    # Step 3: Tagesverlauf als Langzeitstatistik nachziehen. Der Exporter setzt
+    # nur den heutigen Wert; verspaetet eintreffende Daten (etwa nach einem
+    # Sync-Ausfall) wuerden vergangene Tage sonst dauerhaft auf 0 stehen lassen.
+    stats_ok = run_script("statistics_backfill.py", "Tagesstatistik einspielen")
+
     # Summary
     print(f"\n{'='*60}")
     print("SUMMARY:")
     print(f"  Collect:  {'✓' if collect_ok else '✗'}")
     print(f"  Export:   {'✓' if export_ok else '✗'}")
+    print(f"  Statistik:{'✓' if stats_ok else '✗'}")
     print('='*60)
 
-    return 0 if (collect_ok and export_ok) else 1
+    return 0 if (collect_ok and export_ok and stats_ok) else 1
 
 
 if __name__ == "__main__":

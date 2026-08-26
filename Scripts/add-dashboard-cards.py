@@ -83,13 +83,18 @@ NEW_CARDS = [
         "entities": [{"entity": e, "name": n} for e, n in WATCHED_SENSORS],
     },
     {
+        # Bewusst die importierte Statistik statt des Sensors: der Sensor kennt
+        # nur den heutigen Wert, und vergangene Tage liessen sich nicht mehr
+        # korrigieren, wenn Daten verspaetet eintreffen. hascreentime:total wird
+        # bei jedem Lauf komplett aus der CSV neu berechnet und heilt sich daher
+        # selbst -- auch ueber HA-Neustarts und Sync-Ausfaelle hinweg.
         "type": "statistics-graph",
         "title": "Bildschirmzeit je Tag",
         "chart_type": "bar",
         "period": "day",
         "days_to_show": 30,
-        "stat_types": ["sum"],
-        "entities": ["sensor.screentime_total"],
+        "stat_types": ["state"],
+        "statistics": ["hascreentime:total"],
     },
 ]
 
