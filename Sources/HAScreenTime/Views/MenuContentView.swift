@@ -3,6 +3,7 @@ import SwiftUI
 struct MenuContentView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var runner: ExportRunner
+    @EnvironmentObject private var log: LogStore
 
     @Environment(\.openSettings) private var openSettings
     @Environment(\.openWindow) private var openWindow
@@ -36,6 +37,12 @@ struct MenuContentView: View {
         }
 
         Divider()
+
+        if Updater.updateAvailable {
+            Button("Update installieren und neu starten") {
+                _ = Updater.applyIfAvailable(log: log)
+            }
+        }
 
         Button("Einstellungen…") {
             // Nicht `SettingsLink`: als Accessory-App (LSUIElement) werden wir

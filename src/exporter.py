@@ -43,6 +43,40 @@ LAST_EXPORT_FILE = DATA_DIR / ".last_export_timestamp"
 # statt stdout zu parsen (Anzeige, Schwellwert-Alarm, Tageszusammenfassung).
 STATUS_FILE = DATA_DIR / "status.json"
 
+# Diagnose des Collectors (schreibt collector.py). Wird als eigener Sensor nach
+# HA gespiegelt: der Sammel-Benutzer hat ein privates Home, in das von aussen
+# niemand hineinschaut -- ohne diese Bruecke bleibt bei einer stummen Stoerung
+# unklar, WARUM keine Daten ankommen.
+DIAG_FILE = DATA_DIR / "diagnostics.json"
+
+
+def export_diagnostics() -> None:
+    """Spiegelt diagnostics.json als sensor.screentime_diagnose nach HA."""
+    try:
+        diag = json.loads(DIAG_FILE.read_text())
+    except Exception:
+        return
+
+    attrs = {
+        "friendly_name": "Bildschirmzeit Diagnose",
+        "icon": "mdi:stethoscope",
+        "sync_db": diag.get("sync_db"),
+        "geraete_in_biome": len(diag.get("devices_seen") or []),
+        "geprueft_am": diag.get("written_at"),
+    }
+    for name, info in (diag.get("devices") or {}).items():
+        attrs[f"{name} — Status"] = info.get("status")
+        attrs[f"{name} — Ereignisse 28d"] = info.get("events_total_28d")
+        attrs[f"{name} — ID in Biome"] = info.get("in_sync_db")
+        if info.get("stderr"):
+            attrs[f"{name} — Fehler"] = " | ".join(info["stderr"])[:250]
+    # Fremde Geraete-IDs mit auflisten, damit eine geaenderte ID auffaellt.
+    for i, d in enumerate((diag.get("devices_seen") or [])[:12], 1):
+        attrs[f"Biome {i}"] = f"platform {d.get('platform')} · {d.get('id')} · {d.get('last_sync')}"
+
+    state = "Fehler" if diag.get("hard_error") else "ok"
+    update_ha_sensor("sensor.screentime_diagnose", state, attrs, None, state_class=None)
+
 
 CATEGORY_LABELS = {
     "AI": "KI",
@@ -467,6 +501,7 @@ def export_to_homeassistant(rows: list[dict]) -> bool:
         ) and ok
 
     write_status(aggregates)
+    export_diagnostics()
     return ok
 
 

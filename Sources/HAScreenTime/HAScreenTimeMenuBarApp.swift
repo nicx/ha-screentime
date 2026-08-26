@@ -72,6 +72,7 @@ struct HAScreenTimeMenuBarApp: App {
                 .environmentObject(env.settings)
                 .environmentObject(env.runner)
                 .environmentObject(env.loginItem)
+                .environmentObject(env.log)
         } label: {
             MenuBarLabel(runner: env.runner)
         }

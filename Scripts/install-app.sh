@@ -30,6 +30,11 @@ echo "==> Installiere nach $DST"
 rm -rf "$DST"
 cp -R "$SRC" "$DST"
 chmod -R a+rX "$DST"
+# Der Sammel-Benutzer ist Standardbenutzer und darf /Applications nicht
+# beschreiben. Damit die App sich selbst aktualisieren kann (ohne Umzug an einen
+# anderen Pfad, der den Festplattenvollzugriff kosten wuerde), bekommt er
+# Schreibrecht auf genau dieses Bundle.
+chmod -R a+w "$DST"
 
 echo "==> Fertig."
 cat <<'EOF'

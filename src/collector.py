@@ -10,6 +10,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
@@ -34,6 +35,41 @@ AW_BIN = Path(
     os.getenv("SCREENTIME_AW_BIN")
     or (SCRIPT_DIR / "aw-import-screentime" / ".venv" / "bin" / "aw-import-screentime")
 )
+
+# Diagnose des Laufs. Landet in diagnostics.json und von dort als Attribute an
+# sensor.screentime_diagnose -- der Sammel-Benutzer hat ein eigenes Home, in das
+# von aussen niemand hineinsieht, und ohne diese Bruecke ist bei einer stummen
+# Stoerung nicht feststellbar, WARUM nichts ankommt.
+DIAG = {"sync_db": None, "devices_seen": [], "devices": {}, "hard_error": False}
+DIAG_FILE = DATA_DIR / "diagnostics.json"
+
+
+def list_sync_db_devices() -> list[dict]:
+    """Alle Geraete, die Biome aktuell kennt -- zum Abgleich mit der Konfiguration."""
+    try:
+        uri = f"file:{SYNC_DB.as_posix()}?mode=ro&immutable=1"
+        with sqlite3.connect(uri, uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT device_identifier, me, platform, model,
+                          datetime(last_sync_date,'unixepoch','localtime') AS last_sync
+                   FROM DevicePeer ORDER BY platform;"""
+            ).fetchall()
+        DIAG["sync_db"] = "ok"
+        return [dict(r) for r in rows]
+    except Exception as e:
+        # Haeufigster Fall: fehlender Festplattenvollzugriff.
+        DIAG["sync_db"] = f"nicht lesbar: {e}"
+        DIAG["hard_error"] = True
+        return []
+
+
+def write_diagnostics() -> None:
+    try:
+        DIAG["written_at"] = datetime.now().astimezone().isoformat()
+        DIAG_FILE.write_text(json.dumps(DIAG, ensure_ascii=False, indent=2))
+    except Exception as e:
+        print(f"[Diag] konnte {DIAG_FILE} nicht schreiben: {e}")
 
 # Mac knowledgeC.db - the official Screen Time database
 KNOWLEDGE_DB = Path.home() / "Library" / "Application Support" / "Knowledge" / "knowledgeC.db"
@@ -184,15 +220,21 @@ def get_device_platform(device_id: str) -> int:
 
 def get_mobile_data(device_name, device_id, last_created_at):
     """Extracts mobile Screen Time via aw-import-screentime."""
+    d = DIAG["devices"].setdefault(device_name, {"device_id": device_id})
+
     if not device_id:
         print(f"[{device_name}] Device ID not set - skipping")
+        d["status"] = "keine Geraete-ID konfiguriert"
         return []
 
     if not AW_BIN.exists():
         print(f"[{device_name}] aw-import-screentime not found: {AW_BIN}")
+        d["status"] = f"aw-import-screentime fehlt: {AW_BIN}"
+        DIAG["hard_error"] = True
         return []
 
     platform = get_device_platform(device_id)
+    d["platform"] = platform
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Extracting {device_name} data (platform {platform})...")
 
     # Always query 28 days, deduplication happens via created_at
@@ -200,34 +242,42 @@ def get_mobile_data(device_name, device_id, last_created_at):
            "--platform", str(platform), "--since", "28d"]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
-        data = json.loads(result.stdout)
-        events = []
+        # Bewusst ohne check=True: ein Fehlschlag soll als solcher erkennbar
+        # bleiben und nicht als "0 Ereignisse" durchgehen.
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        d["returncode"] = result.returncode
+        if result.returncode != 0:
+            err = (result.stderr or "").strip().splitlines()
+            d["status"] = "aw-import-screentime fehlgeschlagen"
+            d["stderr"] = err[-3:] if err else []
+            DIAG["hard_error"] = True
+            print(f"[{device_name}] FEHLER: aw-import-screentime endete mit {result.returncode}")
+            for line in d["stderr"]:
+                print(f"    {line}")
+            return []
 
-        if data and "events" in data[0]:
-            for event in data[0]["events"]:
+        data = json.loads(result.stdout or "[]")
+        events = []
+        total_seen = 0
+
+        for entry in data:
+            for event in entry.get("events", []):
+                total_seen += 1
                 ts = event["timestamp"]
                 duration = event.get("duration_seconds", 0)
 
-                # Parse timestamp für created_at Vergleich
                 try:
                     dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                    end_time = dt.timestamp() + duration
-                    created_at = end_time
-
-                    # Skip already collected events
+                    created_at = dt.timestamp() + duration
                     if created_at <= last_created_at:
                         continue
-                except:
+                except Exception:
                     continue
 
                 bundle_id = event["data"].get("app", "unknown")
                 title = event["data"].get("title", "unknown")
-
                 if title == "unknown" or not title:
                     title = APP_MAP.get(bundle_id, bundle_id.split(".")[-1])
-
-                # Normalize long App Store names
                 title = normalize_title(title)
 
                 events.append({
@@ -236,14 +286,23 @@ def get_mobile_data(device_name, device_id, last_created_at):
                     "title": title,
                     "duration": round(duration, 2),
                     "source": device_name,
-                    "_created_at": created_at
+                    "_created_at": created_at,
                 })
 
-        print(f"[{device_name}] {len(events)} new entries found")
+        # Zwischen "liefert gar nichts" und "nichts NEUES" unterscheiden: nur
+        # Ersteres deutet auf eine Stoerung (falsche Geraete-ID, Sync steht).
+        d["events_total_28d"] = total_seen
+        d["events_new"] = len(events)
+        d["status"] = "ok" if total_seen else "Biome liefert fuer diese Geraete-ID keine Ereignisse"
+        print(f"[{device_name}] {len(events)} new entries found ({total_seen} in 28 Tagen)")
         return events
+
     except Exception as e:
         print(f"[{device_name}] Error: {e}")
+        d["status"] = f"Ausnahme: {e}"
+        DIAG["hard_error"] = True
         return []
+
 
 def save_to_csv(events):
     if not events:
@@ -309,3 +368,37 @@ if __name__ == "__main__":
     print(f"  Mac: {len(mac_events)} Events")
 
     save_to_csv(all_events)
+
+    # --- Diagnose ---
+    # Welche Geraete kennt Biome gerade wirklich? Der Abgleich mit der
+    # Konfiguration deckt den Fall auf, dass sich eine Geraete-ID geaendert hat
+    # (Biome vergibt sie je Apple-ID neu) -- dann liefert die alte ID stumm 0.
+    seen = list_sync_db_devices()
+    DIAG["devices_seen"] = [
+        {"id": d["device_identifier"], "platform": d.get("platform"),
+         "me": d.get("me"), "last_sync": d.get("last_sync")}
+        for d in seen
+    ]
+    seen_ids = {d["device_identifier"] for d in seen}
+    sync_ok = DIAG["sync_db"] == "ok"
+    for name, dev_id in devices:
+        entry = DIAG["devices"].setdefault(name, {"device_id": dev_id})
+        # Nur aussagekraeftig, wenn sync.db ueberhaupt lesbar war -- sonst waere
+        # jedes Geraet "nicht gefunden" und wuerde die echte Ursache verdecken.
+        entry["in_sync_db"] = dev_id in seen_ids if sync_ok else None
+        if sync_ok and not entry["in_sync_db"]:
+            entry["status"] = "Geraete-ID steht nicht mehr in Biomes Geraeteliste"
+
+    print()
+    print(f"[Diag] sync.db: {DIAG['sync_db']} | Geraete in Biome: {len(seen)}")
+    for name, info in DIAG["devices"].items():
+        print(f"[Diag] {name}: {info.get('status')} "
+              f"(28d={info.get('events_total_28d')}, neu={info.get('events_new')}, "
+              f"in_sync_db={info.get('in_sync_db')})")
+    write_diagnostics()
+
+    # Echte Stoerungen muessen den Lauf scheitern lassen, sonst gilt "0 Ereignisse
+    # wegen kaputter Sammlung" als Erfolg und niemand erfaehrt davon.
+    if DIAG["hard_error"]:
+        print("\n[Diag] Lauf mit Fehlern beendet.")
+        sys.exit(1)

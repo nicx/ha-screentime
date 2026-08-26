@@ -48,6 +48,10 @@ cp "$BIN" "$APP/Contents/MacOS/HAScreenTime"
 cp -R "$RUNTIME" "$APP/Contents/Resources/Runtime"
 [[ -f "$ROOT/Resources/AppIcon.icns" ]] && cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/"
 
+# Build-Kennung: daran erkennt die laufende App, dass eine neuere Version
+# bereitliegt (siehe Updater.swift / Scripts/stage-update.sh).
+date +%Y%m%d-%H%M%S > "$APP/Contents/Resources/BUILD-ID"
+
 # Python-Nutzlast: run.py + src/. aw-import-screentime steckt bereits als
 # pip-Installation in der Runtime und wird nicht separat mitkopiert.
 PAYLOAD="$APP/Contents/Resources/payload"

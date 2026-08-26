@@ -150,6 +150,10 @@ final class ExportRunner: ObservableObject {
         lastRun = Date()
         isRunning = false
 
+        // Nach dem Lauf pruefen, ob eine neuere Version bereitliegt. Bewusst
+        // danach und nicht davor: erst die Arbeit erledigen, dann neu starten.
+        if Updater.applyIfAvailable(log: log) { return }
+
         if result.exitCode == 0 {
             state = .ok
             lastSuccess = Date()
