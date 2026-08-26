@@ -259,6 +259,7 @@ def get_mobile_data(device_name, device_id, last_created_at):
         data = json.loads(result.stdout or "[]")
         events = []
         total_seen = 0
+        newest_ts = None
 
         for entry in data:
             for event in entry.get("events", []):
@@ -268,6 +269,11 @@ def get_mobile_data(device_name, device_id, last_created_at):
 
                 try:
                     dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    # Alter des juengsten Ereignisses ist die aussagekraeftigste
+                    # Zahl ueberhaupt: liefert Biome zwar Daten, sind sie aber
+                    # Tage alt, steht die Synchronisation auf dem Geraet still.
+                    if newest_ts is None or dt > newest_ts:
+                        newest_ts = dt
                     created_at = dt.timestamp() + duration
                     if created_at <= last_created_at:
                         continue
@@ -293,7 +299,18 @@ def get_mobile_data(device_name, device_id, last_created_at):
         # Ersteres deutet auf eine Stoerung (falsche Geraete-ID, Sync steht).
         d["events_total_28d"] = total_seen
         d["events_new"] = len(events)
-        d["status"] = "ok" if total_seen else "Biome liefert fuer diese Geraete-ID keine Ereignisse"
+        d["newest_event"] = newest_ts.astimezone().isoformat(timespec="seconds") if newest_ts else None
+        if newest_ts:
+            age_h = (datetime.now(newest_ts.tzinfo) - newest_ts).total_seconds() / 3600
+            d["newest_event_age_hours"] = round(age_h, 1)
+        if not total_seen:
+            d["status"] = "Biome liefert fuer diese Geraete-ID keine Ereignisse"
+        elif d.get("newest_event_age_hours", 0) > 24:
+            d["status"] = (f"Daten sind veraltet - juengstes Ereignis vor "
+                           f"{d['newest_event_age_hours']:.0f} Stunden; "
+                           f"das Geraet synchronisiert nicht mehr")
+        else:
+            d["status"] = "ok"
         print(f"[{device_name}] {len(events)} new entries found ({total_seen} in 28 Tagen)")
         return events
 

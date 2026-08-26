@@ -67,6 +67,8 @@ def export_diagnostics() -> None:
     for name, info in (diag.get("devices") or {}).items():
         attrs[f"{name} — Status"] = info.get("status")
         attrs[f"{name} — Ereignisse 28d"] = info.get("events_total_28d")
+        attrs[f"{name} — juengstes Ereignis"] = info.get("newest_event")
+        attrs[f"{name} — Datenalter (h)"] = info.get("newest_event_age_hours")
         attrs[f"{name} — ID in Biome"] = info.get("in_sync_db")
         if info.get("stderr"):
             attrs[f"{name} — Fehler"] = " | ".join(info["stderr"])[:250]
@@ -74,7 +76,9 @@ def export_diagnostics() -> None:
     for i, d in enumerate((diag.get("devices_seen") or [])[:12], 1):
         attrs[f"Biome {i}"] = f"platform {d.get('platform')} · {d.get('id')} · {d.get('last_sync')}"
 
-    state = "Fehler" if diag.get("hard_error") else "ok"
+    stale = any((i.get("newest_event_age_hours") or 0) > 24
+                for i in (diag.get("devices") or {}).values())
+    state = "Fehler" if diag.get("hard_error") else ("veraltet" if stale else "ok")
     update_ha_sensor("sensor.screentime_diagnose", state, attrs, None, state_class=None)
 
 

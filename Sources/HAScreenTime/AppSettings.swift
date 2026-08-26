@@ -80,6 +80,13 @@ final class AppSettings: ObservableObject {
         env["SCREENTIME_AW_BIN"] = BundledRuntime.awBinaryURL.path
         // Ausgabe ungepuffert, damit das Log live mitläuft statt am Ende zu klumpen.
         env["PYTHONUNBUFFERED"] = "1"
+        // Bytecode-Cache aus dem App-Bundle heraushalten: Python legt sonst
+        // __pycache__-Dateien neben den Skripten und in der gebündelten Stdlib
+        // an — das bricht bei jedem Lauf das Signatur-Siegel des Bundles
+        // ("a sealed resource is missing or invalid") und gefährdet damit
+        // Berechtigungen wie den Festplattenvollzugriff.
+        env["PYTHONPYCACHEPREFIX"] = BundledRuntime.dataDirectory
+            .deletingLastPathComponent().appendingPathComponent("pycache").path
         return env
     }
 }

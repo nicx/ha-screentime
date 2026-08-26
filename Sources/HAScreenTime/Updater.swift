@@ -130,6 +130,10 @@ enum Updater {
         RC=$?
         echo "rsync rc=$RC" >> "$LOG"
 
+        # Schreibrecht wieder herstellen, sonst schlaegt das naechste
+        # Selbst-Update fehl (die bereitgelegte Version bringt nur a+rX mit).
+        chmod -R a+w "\(target.path)" >> "$LOG" 2>&1
+
         if /usr/bin/codesign --verify --strict "\(target.path)" >> "$LOG" 2>&1; then
           echo "Signatur nach Update gültig" >> "$LOG"
         else

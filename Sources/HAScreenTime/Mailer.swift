@@ -45,6 +45,9 @@ enum Mailer {
         env["MR_BODY"] = body
         env["MR_HOST"] = host
         env["MR_PORT"] = String(port)
+        // s. AppSettings.processEnvironment: kein Bytecode-Cache im Bundle.
+        env["PYTHONPYCACHEPREFIX"] = BundledRuntime.dataDirectory
+            .deletingLastPathComponent().appendingPathComponent("pycache").path
         proc.environment = env
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
