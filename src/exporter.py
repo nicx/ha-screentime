@@ -63,6 +63,7 @@ def export_diagnostics() -> None:
         "sync_db": diag.get("sync_db"),
         "geraete_in_biome": len(diag.get("devices_seen") or []),
         "geprueft_am": diag.get("written_at"),
+        "juengstes Ereignis (h)": diag.get("juengstes_ereignis_alter_h"),
     }
     for name, info in (diag.get("devices") or {}).items():
         attrs[f"{name} — Status"] = info.get("status")
@@ -78,8 +79,11 @@ def export_diagnostics() -> None:
         extra = f" · juengstes Ereignis {newest}" if newest else ""
         attrs[f"Biome {i}"] = (f"platform {d.get('platform')} · sync {d.get('last_sync')}{extra}")
 
-    stale = any((i.get("newest_event_age_hours") or 0) > 24
-                for i in (diag.get("devices") or {}).values())
+    # s. collector.py: nur wenn KEIN Geraet frische Daten liefert, ist die
+    # Synchronisation gestoert -- ein einzelnes ungenutztes Geraet nicht.
+    ages = [i.get("newest_event_age_hours") for i in (diag.get("devices") or {}).values()
+            if i.get("newest_event_age_hours") is not None]
+    stale = bool(ages) and min(ages) > 24
     state = "Fehler" if diag.get("hard_error") else ("veraltet" if stale else "ok")
     update_ha_sensor("sensor.screentime_diagnose", state, attrs, None, state_class=None)
 

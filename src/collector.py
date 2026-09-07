@@ -336,9 +336,12 @@ def get_mobile_data(device_name, device_id, last_created_at):
         if not total_seen:
             d["status"] = "Biome liefert fuer diese Geraete-ID keine Ereignisse"
         elif d.get("newest_event_age_hours", 0) > 24:
-            d["status"] = (f"Daten sind veraltet - juengstes Ereignis vor "
-                           f"{d['newest_event_age_hours']:.0f} Stunden; "
-                           f"das Geraet synchronisiert nicht mehr")
+            # Bewusst neutral formuliert: ein Geraet, das einfach herumliegt,
+            # sieht genauso aus wie eines, das nicht mehr synchronisiert. Ob
+            # die Synchronisation als Ganzes klemmt, entscheidet sich weiter
+            # unten am juengsten Ereignis ueber ALLE Geraete hinweg.
+            d["status"] = (f"seit {d['newest_event_age_hours']:.0f} Stunden keine "
+                           f"Nutzung - Geraet ungenutzt oder synchronisiert nicht")
         else:
             d["status"] = "ok"
         print(f"[{device_name}] {len(events)} new entries found ({total_seen} in 28 Tagen)")
@@ -438,8 +441,13 @@ if __name__ == "__main__":
 
     # Nur im Stoerungsfall die uebrigen Geraete mitpruefen -- im Normalbetrieb
     # waere das unnoetige Last bei jedem Lauf.
-    stale = any((i.get("newest_event_age_hours") or 0) > 24
-                for i in DIAG["devices"].values())
+    # Die Synchronisation gilt nur dann als gestoert, wenn KEIN einziges Geraet
+    # frische Daten liefert. Einzelne ungenutzte Geraete (das iPad liegt oft
+    # tagelang herum) sind normal und duerfen keinen Alarm ausloesen.
+    ages = [i.get("newest_event_age_hours") for i in DIAG["devices"].values()
+            if i.get("newest_event_age_hours") is not None]
+    stale = bool(ages) and min(ages) > 24
+    DIAG["juengstes_ereignis_alter_h"] = min(ages) if ages else None
     if stale and sync_ok:
         print("[Diag] Konfigurierte Geraete veraltet -- pruefe die uebrigen Geraete…")
         configured_ids = {dev_id for _, dev_id in devices}
