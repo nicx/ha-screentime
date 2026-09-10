@@ -328,8 +328,19 @@ def calculate_daily_aggregates(rows: list[dict], target_date=None) -> dict:
 
 
 def update_ha_sensor(entity_id: str, state: any, attributes: dict = None,
-                     unit: str = None, state_class: str | None = "total_increasing"):
-    """Updates a Home Assistant sensor via REST API."""
+                     unit: str = None, state_class: str | None = None):
+    """
+    Setzt einen HA-Sensor per REST-API.
+
+    Bewusst OHNE state_class: Diese Sensoren werden per /api/states injiziert und
+    verschwinden bei jedem HA-Neustart (nachts 02:00 fuers Backup). Mit
+    state_class wuerde HA daraus Langzeitstatistiken aufzeichnen, die nach dem
+    Neustart verwaisen -- ohne passende Entitaet meckert der Recorder (und Spook)
+    ueber "orphaned statistics". Der Tagesverlauf laeuft ohnehin ueber die
+    importierten hascreentime:*-Statistiken (statistics_backfill.py), die genau
+    dafuer gebaut sind: source extern, keine Entitaet noetig, ueberleben
+    Neustarts, heilen Luecken rueckwirkend.
+    """
     if not HA_TOKEN:
         print(f"[HA] HA_TOKEN not set - skipping {entity_id}")
         return False
@@ -344,12 +355,8 @@ def update_ha_sensor(entity_id: str, state: any, attributes: dict = None,
     if unit:
         payload["attributes"]["unit_of_measurement"] = unit
 
-    # state_class nur bei numerischen Sensoren: sonst versucht HA aus einem
-    # App-NAMEN Statistik zu rechnen und meckert.
-    # "total_increasing" statt "measurement": der Wert ist eine Tagessumme, die
-    # um Mitternacht auf 0 zurückfällt. HA erkennt den Rücksprung als Reset und
-    # rechnet die Tageswerte korrekt -- "max pro Tag" würde dagegen den Wert
-    # mitnehmen, der nach Mitternacht bis zum ersten Lauf noch stehenbleibt.
+    # Normalfall: kein state_class (s. Docstring). Nur die Diagnose ruft explizit
+    # mit None auf; nichts setzt hier mehr etwas anderes.
     if state_class:
         payload["attributes"]["state_class"] = state_class
     payload["attributes"]["last_updated"] = datetime.now().isoformat()
@@ -447,9 +454,7 @@ def export_to_homeassistant(rows: list[dict]) -> bool:
 
     ok = True
     for entity_id, state, unit, attrs in sensors:
-        # Der Top-App-Sensor hält einen App-NAMEN, keine Zahl -> keine Statistik.
-        sc = None if entity_id.endswith("_top_app") else "total_increasing"
-        ok = update_ha_sensor(entity_id, state, attrs, unit, state_class=sc) and ok
+        ok = update_ha_sensor(entity_id, state, attrs, unit) and ok
 
     # Category sensor with all values as attributes
     ok = update_ha_sensor(
@@ -461,7 +466,6 @@ def export_to_homeassistant(rows: list[dict]) -> bool:
             **{f"category_{k}": v for k, v in aggregates["by_category"].items()}
         },
         "min",
-        state_class=None
     ) and ok
 
     # Top apps as attributes
@@ -474,7 +478,6 @@ def export_to_homeassistant(rows: list[dict]) -> bool:
             **aggregates["by_app"]
         },
         "apps",
-        state_class=None
     ) and ok
 
     # --- Einzelsensoren pro Kategorie ---
