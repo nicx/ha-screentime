@@ -36,6 +36,17 @@ if [[ ! -x "$RUNTIME/python/bin/python3" ]]; then
   exit 1
 fi
 
+# SDK explizit auf die stabile macOS-26-Reihe pinnen. Am 2026-09-10 hat sich
+# ein macOS-27-Beta-SDK als Default eingenistet (Symlink MacOSX.sdk ->
+# MacOSX27.0.sdk); dessen SwiftUI-Makro-Plugin fehlt, `swift build` bricht
+# dann mit "SwiftUIMacros.StateMacro could not be found" ab. Der Rechner laeuft
+# auf macOS 26.6 -- gegen ein 27er-Beta-SDK zu bauen waere ohnehin falsch.
+CLT_SDKS="/Library/Developer/CommandLineTools/SDKs"
+if [[ -d "$CLT_SDKS/MacOSX26.sdk" ]]; then
+  export SDKROOT="$CLT_SDKS/MacOSX26.sdk"
+  echo "==> SDKROOT gepinnt: $(readlink -f "$SDKROOT" 2>/dev/null || echo "$SDKROOT")"
+fi
+
 echo "==> Baue Release-Binary"
 swift build -c release
 BIN="$(swift build -c release --show-bin-path)/HAScreenTime"
