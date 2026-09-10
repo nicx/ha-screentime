@@ -98,6 +98,12 @@ def build_series(day_values: dict, label: str) -> tuple[dict, list]:
     meta = {
         "has_mean": False,
         "has_sum": True,
+        # mean_type/unit_class loesen has_mean bzw. die implizite Unit-Ableitung
+        # ab. Ohne sie warnt HA seit 2025.x und weist den Import ab HA 2026.11
+        # ganz zurueck. mean_type 0 = StatisticMeanType.NONE (nur Summe),
+        # unit_class "duration" ist die Konversionsklasse fuer "min".
+        "mean_type": 0,
+        "unit_class": "duration",
         "name": label,
         "source": SOURCE,
         "statistic_id": None,      # wird vom Aufrufer gesetzt
