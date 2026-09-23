@@ -92,33 +92,51 @@ def knowledge_devices(limit: int = 8) -> list[dict]:
     try:
         uri = f"file:{KNOWLEDGE_DB.as_posix()}?mode=ro"
         with sqlite3.connect(uri, uri=True) as conn:
+            # Bewusst ALLE Geraete listen, nicht nur solche mit App-Nutzung: ein
+            # Geraet, das nur Sperr-Ereignisse schickt, muss sichtbar sein --
+            # sonst sucht man vergeblich nach einer ID, die es sehr wohl gibt.
             rows = conn.execute(
                 """SELECT s.ZDEVICEID,
-                          count(*),
+                          sum(o.ZSTREAMNAME = '/app/usage'),
                           datetime(max(o.ZSTARTDATE) + 978307200,'unixepoch','localtime')
                    FROM ZOBJECT o JOIN ZSOURCE s ON s.Z_PK = o.ZSOURCE
-                   WHERE s.ZDEVICEID IS NOT NULL AND o.ZSTREAMNAME = '/app/usage'
+                   WHERE s.ZDEVICEID IS NOT NULL
                    GROUP BY s.ZDEVICEID;"""
             ).fetchall()
             out = []
-            for dev_id, events, newest in rows:
-                apps = conn.execute(
-                    """SELECT o.ZVALUESTRING, count(*) AS n
-                       FROM ZOBJECT o JOIN ZSOURCE s ON s.Z_PK = o.ZSOURCE
-                       WHERE s.ZDEVICEID = ? AND o.ZSTREAMNAME = '/app/usage'
-                         AND o.ZVALUESTRING IS NOT NULL
-                       GROUP BY 1 ORDER BY n DESC LIMIT ?;""",
-                    (dev_id, limit),
-                ).fetchall()
+            for dev_id, app_events, newest in rows:
+                app_events = app_events or 0
+                if app_events:
+                    detail = conn.execute(
+                        """SELECT o.ZVALUESTRING, count(*) AS n
+                           FROM ZOBJECT o JOIN ZSOURCE s ON s.Z_PK = o.ZSOURCE
+                           WHERE s.ZDEVICEID = ? AND o.ZSTREAMNAME = '/app/usage'
+                             AND o.ZVALUESTRING IS NOT NULL
+                           GROUP BY 1 ORDER BY n DESC LIMIT ?;""",
+                        (dev_id, limit),
+                    ).fetchall()
+                    label = "knowledgeC · App-Nutzung"
+                else:
+                    # Ersatzweise die gelieferten Datenstroeme zeigen -- daran ist
+                    # erkennbar, dass das Geraet zwar synchronisiert, aber eben
+                    # keine App-Nutzung meldet.
+                    detail = conn.execute(
+                        """SELECT o.ZSTREAMNAME, count(*) AS n
+                           FROM ZOBJECT o JOIN ZSOURCE s ON s.Z_PK = o.ZSOURCE
+                           WHERE s.ZDEVICEID = ?
+                           GROUP BY 1 ORDER BY n DESC LIMIT ?;""",
+                        (dev_id, limit),
+                    ).fetchall()
+                    label = "knowledgeC · keine App-Nutzung"
                 out.append({
                     "device_id": dev_id,
                     "platform": None,
-                    "platform_name": "knowledgeC",
+                    "platform_name": label,
                     "model": "",
                     "last_sync": newest or "",
                     "is_self": False,
-                    "events": events,
-                    "top_apps": [[a, n] for a, n in apps],
+                    "events": app_events,
+                    "top_apps": [[a, n] for a, n in detail],
                 })
             return out
     except Exception:
