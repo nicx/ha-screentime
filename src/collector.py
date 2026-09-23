@@ -227,6 +227,111 @@ def get_mac_data(last_created_at):
         print(f"[Mac] Error: {e}")
         return []
 
+def list_knowledge_devices() -> list[dict]:
+    """
+    Fremdgeraete, die knowledgeC.db kennt -- die zweite, von Biome unabhaengige
+    Quelle. Seit iOS 27 liefert Biome fuer Kinder-Geraete nichts mehr, waehrend
+    hier weiterhin Ereignisse einlaufen (verifiziert 2026-09-23, Latenz 1-3 min).
+    knowledgeC vergibt EIGENE Geraete-IDs, die nicht denen aus Biome entsprechen.
+    """
+    if not KNOWLEDGE_DB.exists() or not os.access(KNOWLEDGE_DB, os.R_OK):
+        return []
+    try:
+        with sqlite3.connect(f"file:{KNOWLEDGE_DB}?mode=ro", uri=True) as conn:
+            rows = conn.execute(
+                """SELECT s.ZDEVICEID,
+                          group_concat(DISTINCT o.ZSTREAMNAME),
+                          count(*),
+                          max(o.ZSTARTDATE)
+                   FROM ZOBJECT o JOIN ZSOURCE s ON s.Z_PK = o.ZSOURCE
+                   WHERE s.ZDEVICEID IS NOT NULL
+                   GROUP BY s.ZDEVICEID;"""
+            ).fetchall()
+        out = []
+        for dev_id, streams, count, newest in rows:
+            out.append({
+                "device_identifier": dev_id,
+                "streams": (streams or "").split(","),
+                "events": count,
+                "newest": datetime.fromtimestamp(newest + APPLE_EPOCH_OFFSET)
+                          .astimezone().isoformat(timespec="seconds") if newest else None,
+            })
+        return out
+    except Exception as e:
+        print(f"[WARN] knowledgeC.db nicht lesbar: {e}")
+        return []
+
+
+def get_knowledge_data(device_name, device_id, last_created_at):
+    """Nutzung eines Fremdgeraets aus knowledgeC.db -- Gegenstueck zu get_mobile_data."""
+    d = DIAG["devices"].setdefault(device_name, {"device_id": device_id})
+    d["quelle"] = "knowledgeC"
+
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Extracting {device_name} data (knowledgeC)...")
+    try:
+        with sqlite3.connect(f"file:{KNOWLEDGE_DB}?mode=ro", uri=True) as conn:
+            # Bestand der letzten 28 Tage getrennt vom Neuzugang ermitteln: nur so
+            # ist "liefert gar nichts" von "nichts Neues" unterscheidbar.
+            total, newest = conn.execute(
+                """SELECT count(*), max(o.ZSTARTDATE)
+                   FROM ZOBJECT o JOIN ZSOURCE s ON s.Z_PK = o.ZSOURCE
+                   WHERE o.ZSTREAMNAME = '/app/usage' AND s.ZDEVICEID = ?
+                     AND o.ZSTARTDATE > ?;""",
+                (device_id, datetime.now().timestamp() - 28 * 86400 - APPLE_EPOCH_OFFSET),
+            ).fetchone()
+
+            rows = conn.execute(
+                """SELECT o.ZVALUESTRING,
+                          (o.ZENDDATE - o.ZSTARTDATE),
+                          (o.ZSTARTDATE + ?),
+                          (o.ZCREATIONDATE + ?)
+                   FROM ZOBJECT o JOIN ZSOURCE s ON s.Z_PK = o.ZSOURCE
+                   WHERE o.ZSTREAMNAME = '/app/usage' AND s.ZDEVICEID = ?
+                     AND (o.ZCREATIONDATE + ?) > ?
+                   ORDER BY o.ZSTARTDATE ASC;""",
+                (APPLE_EPOCH_OFFSET, APPLE_EPOCH_OFFSET, device_id,
+                 APPLE_EPOCH_OFFSET, last_created_at),
+            ).fetchall()
+    except Exception as e:
+        print(f"[{device_name}] Fehler beim Lesen von knowledgeC.db: {e}")
+        d["status"] = f"knowledgeC-Fehler: {e}"
+        DIAG["hard_error"] = True
+        return []
+
+    events = []
+    for app, usage, start_time, created_at in rows:
+        if not app or usage is None or usage <= 0:
+            continue
+        events.append({
+            "timestamp": datetime.fromtimestamp(start_time).astimezone().isoformat(),
+            "app": app,
+            "title": normalize_title(get_app_title(app)),
+            "duration": round(usage, 2),
+            "source": device_name,
+            "_created_at": created_at,
+        })
+
+    d["events_total_28d"] = total or 0
+    d["events_new"] = len(events)
+    if newest:
+        newest_dt = datetime.fromtimestamp(newest + APPLE_EPOCH_OFFSET).astimezone()
+        d["newest_event"] = newest_dt.isoformat(timespec="seconds")
+        d["newest_event_age_hours"] = round(
+            (datetime.now(newest_dt.tzinfo) - newest_dt).total_seconds() / 3600, 1)
+    else:
+        d["newest_event"] = None
+
+    if not total:
+        d["status"] = "knowledgeC liefert fuer diese Geraete-ID keine App-Nutzung"
+    elif d.get("newest_event_age_hours", 0) > 24:
+        d["status"] = (f"seit {d['newest_event_age_hours']:.0f} Stunden keine "
+                       f"Nutzung - Geraet ungenutzt oder synchronisiert nicht")
+    else:
+        d["status"] = "ok"
+    print(f"[{device_name}] {len(events)} new entries found ({total} in 28 Tagen)")
+    return events
+
+
 def get_device_platform(device_id: str) -> int:
     """
     Looks up the Biome platform code for a device (2=iPhone, 1=iPad, 3=Mac, ...).
@@ -249,13 +354,22 @@ def get_device_platform(device_id: str) -> int:
 
 
 def get_mobile_data(device_name, device_id, last_created_at):
-    """Extracts mobile Screen Time via aw-import-screentime."""
+    """
+    Nutzung eines Mobilgeraets. Die Geraete-ID entscheidet selbst ueber die
+    Quelle: steht sie in knowledgeC.db, wird von dort gelesen, sonst ueber
+    aw-import-screentime aus Biome. Beide Datenbanken vergeben eigene IDs, eine
+    ID kann also immer nur zu einer von beiden gehoeren.
+    """
     d = DIAG["devices"].setdefault(device_name, {"device_id": device_id})
 
     if not device_id:
         print(f"[{device_name}] Device ID not set - skipping")
         d["status"] = "keine Geraete-ID konfiguriert"
         return []
+
+    if device_id in {dev["device_identifier"] for dev in list_knowledge_devices()}:
+        return get_knowledge_data(device_name, device_id, last_created_at)
+    d["quelle"] = "Biome"
 
     if not AW_BIN.exists():
         print(f"[{device_name}] aw-import-screentime not found: {AW_BIN}")
@@ -431,12 +545,17 @@ if __name__ == "__main__":
     ]
     seen_ids = {d["device_identifier"] for d in seen}
     sync_ok = DIAG["sync_db"] == "ok"
+    knowledge_seen = list_knowledge_devices()
+    DIAG["knowledge_devices"] = knowledge_seen
+    knowledge_ids = {d["device_identifier"] for d in knowledge_seen}
     for name, dev_id in devices:
         entry = DIAG["devices"].setdefault(name, {"device_id": dev_id})
         # Nur aussagekraeftig, wenn sync.db ueberhaupt lesbar war -- sonst waere
         # jedes Geraet "nicht gefunden" und wuerde die echte Ursache verdecken.
         entry["in_sync_db"] = dev_id in seen_ids if sync_ok else None
-        if sync_ok and not entry["in_sync_db"]:
+        # Ein knowledgeC-Geraet steht naturgemaess nicht in Biomes Liste; das
+        # waere sonst faelschlich eine Stoerungsmeldung.
+        if sync_ok and not entry["in_sync_db"] and dev_id not in knowledge_ids:
             entry["status"] = "Geraete-ID steht nicht mehr in Biomes Geraeteliste"
 
     # Nur im Stoerungsfall die uebrigen Geraete mitpruefen -- im Normalbetrieb
@@ -457,7 +576,12 @@ if __name__ == "__main__":
             entry["newest_event"] = probe_newest_event(entry["id"], entry.get("platform") or 2)
 
     print()
-    print(f"[Diag] sync.db: {DIAG['sync_db']} | Geraete in Biome: {len(seen)}")
+    print(f"[Diag] sync.db: {DIAG['sync_db']} | Geraete in Biome: {len(seen)} "
+          f"| Geraete in knowledgeC: {len(knowledge_seen)}")
+    for e in knowledge_seen:
+        print(f"[Diag]   knowledgeC {e['device_identifier'][:8]}…: "
+              f"{e['events']} Ereignisse, juengstes {e['newest']}, "
+              f"Stroeme {'/app/usage' in e['streams'] and 'inkl. App-Nutzung' or 'ohne App-Nutzung'}")
     for e in DIAG["devices_seen"]:
         if e.get("newest_event"):
             print(f"[Diag]   platform {e.get('platform')}: juengstes Ereignis {e['newest_event']}")

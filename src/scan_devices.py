@@ -21,6 +21,7 @@ from collections import Counter
 from pathlib import Path
 
 SYNC_DB = Path.home() / "Library" / "Biome" / "sync" / "sync.db"
+KNOWLEDGE_DB = Path.home() / "Library" / "Application Support" / "Knowledge" / "knowledgeC.db"
 
 AW_BIN = Path(
     os.getenv("SCREENTIME_AW_BIN")
@@ -79,12 +80,61 @@ def top_apps(device_id: str, platform: int, limit: int = 8) -> tuple[int, list[l
     return total, [[n, c] for n, c in counter.most_common(limit)]
 
 
+def knowledge_devices(limit: int = 8) -> list[dict]:
+    """
+    Fremdgeraete aus knowledgeC.db -- die zweite Quelle neben Biome. Seit iOS 27
+    liefert Biome fuer Kinder-Geraete keine App-Nutzung mehr, knowledgeC dagegen
+    schon. Die IDs beider Datenbanken sind verschieden, ein Geraet kann also in
+    beiden Listen mit unterschiedlicher ID auftauchen.
+    """
+    if not KNOWLEDGE_DB.exists() or not os.access(KNOWLEDGE_DB, os.R_OK):
+        return []
+    try:
+        uri = f"file:{KNOWLEDGE_DB.as_posix()}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as conn:
+            rows = conn.execute(
+                """SELECT s.ZDEVICEID,
+                          count(*),
+                          datetime(max(o.ZSTARTDATE) + 978307200,'unixepoch','localtime')
+                   FROM ZOBJECT o JOIN ZSOURCE s ON s.Z_PK = o.ZSOURCE
+                   WHERE s.ZDEVICEID IS NOT NULL AND o.ZSTREAMNAME = '/app/usage'
+                   GROUP BY s.ZDEVICEID;"""
+            ).fetchall()
+            out = []
+            for dev_id, events, newest in rows:
+                apps = conn.execute(
+                    """SELECT o.ZVALUESTRING, count(*) AS n
+                       FROM ZOBJECT o JOIN ZSOURCE s ON s.Z_PK = o.ZSOURCE
+                       WHERE s.ZDEVICEID = ? AND o.ZSTREAMNAME = '/app/usage'
+                         AND o.ZVALUESTRING IS NOT NULL
+                       GROUP BY 1 ORDER BY n DESC LIMIT ?;""",
+                    (dev_id, limit),
+                ).fetchall()
+                out.append({
+                    "device_id": dev_id,
+                    "platform": None,
+                    "platform_name": "knowledgeC",
+                    "model": "",
+                    "last_sync": newest or "",
+                    "is_self": False,
+                    "events": events,
+                    "top_apps": [[a, n] for a, n in apps],
+                })
+            return out
+    except Exception:
+        return []
+
+
 def main() -> int:
     try:
         devices = read_devices()
     except Exception as e:
-        json.dump({"error": str(e), "devices": []}, sys.stdout)
-        return 1
+        # Biome kann fehlen oder leer sein -- knowledgeC ist davon unabhaengig
+        # und seit iOS 27 oft die einzige Quelle mit App-Nutzung.
+        known = knowledge_devices()
+        json.dump({"error": None if known else str(e), "devices": known}, sys.stdout,
+                  ensure_ascii=False)
+        return 0 if known else 1
 
     result = []
     for d in devices:
@@ -104,6 +154,7 @@ def main() -> int:
             "top_apps": apps,
         })
 
+    result.extend(knowledge_devices())
     json.dump({"error": None, "devices": result}, sys.stdout, ensure_ascii=False)
     return 0
 
