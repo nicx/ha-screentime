@@ -435,9 +435,11 @@ def export_to_homeassistant(rows: list[dict]) -> bool:
             by_device.setdefault(configured_name, 0.0)
 
     for device_name, minutes in by_device.items():
-        # Create entity_id from device name (e.g., "iPhone 15 Pro" -> "screentime_iphone_15_pro")
-        entity_suffix = device_name.lower().replace(" ", "_").replace("-", "_")
-        entity_id = f"sensor.screentime_{entity_suffix}"
+        # Geraetename -> Entity-ID ("iPhone 15 Pro" -> "screentime_iphone_15_pro").
+        # Ueber slugify, nicht per Hand: HA weist Entity-IDs mit doppeltem
+        # Unterstrich ab, und ein versehentliches Doppelleerzeichen im
+        # Geraetenamen liess den Sensor sonst kommentarlos ganz ausfallen.
+        entity_id = f"sensor.screentime_{slugify(device_name)}"
 
         # Choose icon based on device type
         if "mac" in device_name.lower():
