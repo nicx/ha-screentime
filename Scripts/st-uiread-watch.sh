@@ -6,13 +6,14 @@
 #   2. Funktioniert das Auslesen auch bei gesperrtem Bildschirm?
 #
 #   bash ~/Git/ha-screentime/Scripts/st-uiread-watch.sh [Abstand_s] [Anzahl] [Kind]
-#   Standard: alle 180 s, 20 Laeufe (= 1 Stunde), Kind "Max"
+#   Standard: alle 180 s, 20 Laeufe (= 1 Stunde), Kind aus SCREENTIME_CHILD
 #
 # Laeuft im Hintergrund weiter, solange das Terminal offen bleibt.
 #
 set -uo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
-INTERVAL="${1:-180}"; COUNT="${2:-20}"; CHILD="${3:-Max}"
+INTERVAL="${1:-180}"; COUNT="${2:-20}"; CHILD="${3:-${SCREENTIME_CHILD:-}}"
+[[ -n "$CHILD" ]] || { echo "Name des Kindes fehlt (3. Argument oder SCREENTIME_CHILD)"; exit 64; }
 OUT_DIR="$HOME/Library/Caches/HAScreenTime"; mkdir -p "$OUT_DIR"
 LOG="$OUT_DIR/watch-$(date +%Y%m%d-%H%M%S).tsv"
 BIN="$OUT_DIR/st-uiread"

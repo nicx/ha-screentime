@@ -3,7 +3,7 @@
 # st-uiread.sh — Prototyp: Bildschirmzeit eines Kindes aus den
 # Systemeinstellungen (Familie) auslesen, inklusive Navigation.
 #
-#   bash ~/Git/ha-screentime/Scripts/st-uiread.sh [Kindname]
+#   bash ~/Git/ha-screentime/Scripts/st-uiread.sh <Kindname>
 #
 # Braucht die Bedienungshilfen-Berechtigung fuer das ausfuehrende Terminal.
 # Das Ergebnis enthaelt Nutzungsdaten und landet ausserhalb des Repos. Schlaegt
@@ -19,7 +19,7 @@ OUT="$OUT_DIR/uiread-$STAMP.json"
 SDK=/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk
 [[ -d "$SDK" ]] && export SDKROOT="$SDK"
 
-if swift "$DIR/st-uiread.swift" "${1:-Max}" > "$OUT"; then
+if swift "$DIR/st-uiread.swift" "${1:-${SCREENTIME_CHILD:-}}" > "$OUT"; then
   echo "==> Ergebnis: $OUT"
   /usr/bin/python3 - "$OUT" <<'EOF'
 import json, sys

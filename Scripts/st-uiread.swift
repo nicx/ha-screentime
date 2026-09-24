@@ -6,7 +6,7 @@
 // Datenbank ein DataVault ist. Apple versieht die Elemente mit festen
 // Kennungen (z. B. "progress-bar-application:<bundle-id>"), darauf baut das hier.
 //
-// Aufruf: swift st-uiread.swift [Kindname]   (Standard: Max)
+// Aufruf: swift st-uiread.swift <Kindname>   (oder Umgebungsvariable SCREENTIME_CHILD)
 // Ausgabe: JSON auf stdout, Ablaufprotokoll auf stderr.
 
 import Cocoa
@@ -98,7 +98,10 @@ func nameAndSeconds(_ d: String) -> (String, Int?) {
 
 // MARK: - Start
 
-let childName = CommandLine.arguments.dropFirst().first ?? "Max"
+guard let childName = (CommandLine.arguments.dropFirst().first
+        ?? ProcessInfo.processInfo.environment["SCREENTIME_CHILD"]).flatMap({ $0.isEmpty ? nil : $0 }) else {
+    fail("Name des Kindes fehlt (Argument oder SCREENTIME_CHILD)", code: 64)
+}
 let started = Date()
 
 let promptOpt = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
