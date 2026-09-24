@@ -2,10 +2,10 @@
 #
 # Installiert die gebaute App nach /Applications.
 #
-# Abweichung von den Schwester-Apps: die laufen produktiv aus ~/Git/<repo>/dist/.
-# Das geht hier NICHT — die App läuft im Sammel-Benutzer (Apple-ID des Kindes),
-# und Home-Verzeichnisse sind drwxr-x---, für ihn also nicht betretbar. /Applications ist
-# für beide Benutzer lesbar und für Admins ohne sudo beschreibbar.
+# Abweichung von den Schwester-Apps (die laufen produktiv aus ~/Git/<repo>/dist/):
+# HAScreenTime lief frueher in einem eigenen Sammel-Benutzer, der das Home des
+# Entwicklers nicht betreten konnte; /Applications ist fuer alle lesbar und fuer
+# Admins ohne sudo beschreibbar. Der Selbst-Update-Mechanismus setzt darauf auf.
 #
 set -euo pipefail
 
@@ -30,23 +30,21 @@ echo "==> Installiere nach $DST"
 rm -rf "$DST"
 cp -R "$SRC" "$DST"
 chmod -R a+rX "$DST"
-# Der Sammel-Benutzer ist Standardbenutzer und darf /Applications nicht
-# beschreiben. Damit die App sich selbst aktualisieren kann (ohne Umzug an einen
-# anderen Pfad, der den Festplattenvollzugriff kosten wuerde), bekommt er
-# Schreibrecht auf genau dieses Bundle.
+# Damit die App sich auch als Standardbenutzer selbst aktualisieren kann (ohne
+# Umzug an einen anderen Pfad, der erteilte Berechtigungen kosten wuerde),
+# ist genau dieses Bundle fuer alle beschreibbar.
 chmod -R a+w "$DST"
 
 echo "==> Fertig."
 cat <<'EOF'
 
-Nächste Schritte im Sammel-Benutzer (per Bildschirmfreigabe anmelden,
-NICHT über den schnellen Benutzerwechsel):
+Nächste Schritte (in der Sitzung, in der die App laufen soll):
 
-  1. /Applications/HAScreenTime.app starten
-  2. Systemeinstellungen -> Datenschutz & Sicherheit -> Festplattenvollzugriff
-     -> HAScreenTime.app hinzufügen und aktivieren, danach App neu starten.
-     (Ohne Festplattenvollzugriff kommt die App nicht an ~/Library/Biome.)
-  3. In den Einstellungen der App: Home-Assistant-URL + Token, Geräte,
-     Mail-Empfänger eintragen.
+  1. /Applications/HAScreenTime.app starten.
+  2. Beim ersten Start fragt macOS nach den Bedienungshilfen: Systemeinstellungen
+     -> Datenschutz & Sicherheit -> Bedienungshilfen -> HAScreenTime einschalten.
+     Die App liest die Werte aus Familie -> Bildschirmzeit.
+  3. In den Einstellungen der App: Home-Assistant-URL + Token, Name des Kindes
+     (wie unter Familie aufgefuehrt), Mail-Empfaenger.
   4. "Bei der Anmeldung starten" aktivieren.
 EOF
