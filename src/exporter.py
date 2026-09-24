@@ -349,7 +349,13 @@ def calculate_daily_aggregates(rows: list[dict], target_date=None) -> dict:
     total_seconds = sum(r["duration"] for r in day_rows)
 
     by_device = {} if UI_MODE else {k: round(v / 60, 1) for k, v in sum_by("source").items()}
-    by_category = {k: round(v / 60, 1) for k, v in sum_by("category").items()}
+    # Der Rundungsrest ("Nicht zugeordnet") gehoert zu keiner Kategorie: er
+    # zaehlt zur Gesamtzeit, wuerde "Sonstiges" aber kuenstlich aufblaehen.
+    by_category_s: dict[str, float] = defaultdict(float)
+    for r in day_rows:
+        if r["title"] != UNATTRIBUTED_TITLE:
+            by_category_s[r.get("category") or "Unknown"] += r["duration"]
+    by_category = {k: round(v / 60, 1) for k, v in by_category_s.items()}
 
     app_totals = sorted(sum_by("title").items(), key=lambda kv: kv[1], reverse=True)
     # "Nicht zugeordnet" ist Rundungsrest, keine App: zaehlt zur Gesamtzeit,

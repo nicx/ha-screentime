@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 
 import websockets
 
+from config import UNATTRIBUTED_TITLE
 from exporter import CATEGORY_LABELS, load_data, slugify, watched_apps
 
 HA_URL = os.getenv("HA_URL", "http://localhost:8123")
@@ -66,7 +67,9 @@ def daily_totals(rows: list[dict]) -> dict:
         out["total"][day] += minutes
         if not UI_MODE:
             out[f"device_{slugify(r.get('source') or 'unknown')}"][day] += minutes
-        out[f"cat_{slugify(r.get('category') or 'Other')}"][day] += minutes
+        # Rundungsrest zaehlt zur Gesamtzeit, aber zu keiner Kategorie.
+        if r["title"] != UNATTRIBUTED_TITLE:
+            out[f"cat_{slugify(r.get('category') or 'Other')}"][day] += minutes
         if r["title"] in watched:
             out[f"app_{slugify(r['title'])}"][day] += minutes
     return out
