@@ -49,7 +49,7 @@ STATUS_FILE = DATA_DIR / "status.json"
 # niemand hineinschaut -- ohne diese Bruecke bleibt bei einer stummen Stoerung
 # unklar, WARUM keine Daten ankommen.
 DIAG_FILE = Path(os.getenv("SCREENTIME_DIAG_FILE") or (DATA_DIR / "diagnostics.json"))
-CATEGORIES_FILE = DATA_DIR / "categories.csv"
+ALLOWANCES_FILE = DATA_DIR / "allowances.csv"
 
 # Je Kind ein eigenes Kuerzel in allen Entity-IDs (sensor.screentime_<kind>_total)
 # und ein Name fuer die Anzeige ("Bildschirmzeit Kind gesamt").
@@ -343,12 +343,12 @@ def export_to_influxdb(rows: list[dict]) -> bool:
         return False
 
 
-def load_apple_categories() -> dict:
-    """{datum: {kategoriename: sekunden}} aus categories.csv (Quelle "ui")."""
+def load_allowances() -> dict:
+    """{datum: {name der nutzungszeit: sekunden}} aus allowances.csv (Quelle "ui")."""
     out: dict = defaultdict(dict)
-    if not CATEGORIES_FILE.exists():
+    if not ALLOWANCES_FILE.exists():
         return out
-    with CATEGORIES_FILE.open(newline="", encoding="utf-8") as f:
+    with ALLOWANCES_FILE.open(newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             try:
                 day = datetime.fromisoformat(row["date"]).date()
@@ -358,10 +358,10 @@ def load_apple_categories() -> dict:
     return out
 
 
-def known_apple_categories() -> list[str]:
-    """Alle Kategorien der vorhandenen Tage -- auch an Tagen ohne Nutzung wird
-    jede gemeldet, sonst verschwaende die Entity und risse Luecken."""
-    return sorted({name for day in load_apple_categories().values() for name in day})
+def known_allowances() -> list[str]:
+    """Alle Nutzungszeiten der vorhandenen Tage -- auch an Tagen ohne Nutzung
+    wird jede gemeldet, sonst verschwaende die Entity und risse Luecken."""
+    return sorted({name for day in load_allowances().values() for name in day})
 
 
 def calculate_daily_aggregates(rows: list[dict], target_date=None) -> dict:
@@ -404,11 +404,12 @@ def calculate_daily_aggregates(rows: list[dict], target_date=None) -> dict:
         if r["title"] != UNATTRIBUTED_TITLE:
             by_category_s[r.get("category") or "Unknown"] += r["duration"]
     by_category = {k: round(v / 60, 1) for k, v in by_category_s.items()}
+    by_allowance = {}
     if UI_MODE:
-        # Apples eigene Kategorien statt unserer Zuordnung (seit iOS 27 korrekt,
-        # eigene Kategorien moeglich). Den Rundungsrest hat Apple dort schon verteilt.
-        by_category = {k: round(v / 60, 1)
-                       for k, v in load_apple_categories().get(target_date, {}).items()}
+        # Statt Kategorien die Nutzungszeiten (App-Gruppen mit Tageslimit, iOS 27).
+        by_category = {}
+        by_allowance = {k: round(v / 60, 1)
+                        for k, v in load_allowances().get(target_date, {}).items()}
 
     app_totals = sorted(sum_by("title").items(), key=lambda kv: kv[1], reverse=True)
     # "Nicht zugeordnet" ist Rundungsrest, keine App: zaehlt zur Gesamtzeit,
@@ -426,6 +427,7 @@ def calculate_daily_aggregates(rows: list[dict], target_date=None) -> dict:
         "top_app": top_app,
         "top_app_minutes": round(top_app_seconds / 60, 1),
         "by_category": by_category,
+        "by_allowance": by_allowance,
         "by_app": by_app,
         "by_app_all": by_app_all,
         "session_count": len(day_rows),
@@ -510,6 +512,7 @@ def export_to_homeassistant(rows: list[dict]) -> bool:
             "top_app": "-",
             "top_app_minutes": 0.0,
             "by_category": {},
+            "by_allowance": {},
             "by_app": {},
             "by_app_all": {},
             "session_count": 0,
@@ -564,17 +567,30 @@ def export_to_homeassistant(rows: list[dict]) -> bool:
         ok = update_ha_sensor(entity_id, state, attrs, unit) and ok
 
     # Category sensor with all values as attributes
-    # Zustand: Minuten der groessten Kategorie; alle Werte stehen in den Attributen.
-    ok = update_ha_sensor(
-        eid("by_category"),
-        max(aggregates["by_category"].values(), default=0),
-        {
-            "friendly_name": label("Kategorien (Übersicht)"),
-            "icon": "mdi:chart-pie",
-            **{f"category_{k}": v for k, v in aggregates["by_category"].items()}
-        },
-        "min",
-    ) and ok
+    if UI_MODE:
+        # Zustand: Minuten der groessten Nutzungszeit; alle Werte in den Attributen.
+        ok = update_ha_sensor(
+            eid("by_allowance"),
+            max(aggregates["by_allowance"].values(), default=0),
+            {
+                "friendly_name": label("Nutzungszeiten (Übersicht)"),
+                "icon": "mdi:timer-sand",
+                **{f"allowance_{k}": v for k, v in aggregates["by_allowance"].items()}
+            },
+            "min",
+        ) and ok
+    else:
+        # Zustand: Minuten der groessten Kategorie; alle Werte in den Attributen.
+        ok = update_ha_sensor(
+            eid("by_category"),
+            max(aggregates["by_category"].values(), default=0),
+            {
+                "friendly_name": label("Kategorien (Übersicht)"),
+                "icon": "mdi:chart-pie",
+                **{f"category_{k}": v for k, v in aggregates["by_category"].items()}
+            },
+            "min",
+        ) and ok
 
     # Top apps as attributes
     ok = update_ha_sensor(
@@ -593,11 +609,11 @@ def export_to_homeassistant(rows: list[dict]) -> bool:
     # verschwindet die Entity an ruhigen Tagen und reißt Lücken in Verlauf und
     # Langzeitstatistik.
     if UI_MODE:
-        for category in known_apple_categories():
+        for name in known_allowances():
             ok = update_ha_sensor(
-                eid(f"cat_{slugify(category)}"),
-                aggregates["by_category"].get(category, 0.0),
-                {"friendly_name": label(category), "icon": "mdi:shape"},
+                eid(f"allowance_{slugify(name)}"),
+                aggregates["by_allowance"].get(name, 0.0),
+                {"friendly_name": label(f"Nutzungszeit {name}"), "icon": "mdi:timer-sand"},
                 "min"
             ) and ok
     else:

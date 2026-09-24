@@ -10,7 +10,7 @@ children/<kind>/days/<datum>.json ab; dieser Lauf bekommt das Verzeichnis des
 Kindes als SCREENTIME_DATA_DIR.
 
 Beide CSVs werden bei jedem Lauf komplett neu geschrieben: screentime.csv mit
-einer Zeile je App und Tag, categories.csv mit Apples Kategorien je Tag.
+einer Zeile je App und Tag, allowances.csv mit den Nutzungszeiten je Tag.
 """
 
 import csv
@@ -25,9 +25,9 @@ SCRIPT_DIR = Path(__file__).parent.parent
 DATA_DIR = Path(os.getenv("SCREENTIME_DATA_DIR") or (SCRIPT_DIR / "data"))
 DAYS_DIR = DATA_DIR / "days"
 CSV_FILE = DATA_DIR / "screentime.csv"
-# Apples Kategorien je Tag (Kennung, Name, Sekunden) -- seit iOS 27 korrekt und
-# vom Nutzer erweiterbar, deshalb statt unserer eigenen Zuordnung.
-CATEGORIES_FILE = DATA_DIR / "categories.csv"
+# Nutzungszeiten je Tag (Kennung, Name, Sekunden): die App-Gruppen mit
+# Tageslimit aus iOS 27, teils von Apple vorgegeben, teils selbst angelegt.
+ALLOWANCES_FILE = DATA_DIR / "allowances.csv"
 SOURCE_NAME = os.getenv("SCREENTIME_CHILD") or "Kind"
 
 # So weit reicht die Tagesstatistik (statistics_backfill.DAYS_BACK) zurück.
@@ -114,10 +114,10 @@ def rows_for(snap: dict) -> list[dict]:
     return rows
 
 
-def category_rows_for(snap: dict) -> list[dict]:
-    return [{"date": snap["_day"].isoformat(), "id": c.get("id") or "", "name": c["name"],
-             "seconds": c["seconds"]}
-            for c in snap.get("categories") or [] if c.get("name") and c.get("seconds")]
+def allowance_rows_for(snap: dict) -> list[dict]:
+    return [{"date": snap["_day"].isoformat(), "id": a.get("id") or "", "name": a["name"],
+             "seconds": a["seconds"]}
+            for a in snap.get("allowances") or [] if a.get("name") and a.get("seconds")]
 
 
 def write_csv(path: Path, fields: list[str], rows: list[dict]) -> None:
@@ -134,8 +134,10 @@ def main() -> int:
     days = load_days()
     rows = [r for snap in days for r in rows_for(snap)]
     write_csv(CSV_FILE, ["timestamp", "app", "title", "duration", "source"], rows)
-    write_csv(CATEGORIES_FILE, ["date", "id", "name", "seconds"],
-              [r for snap in days for r in category_rows_for(snap)])
+    write_csv(ALLOWANCES_FILE, ["date", "id", "name", "seconds"],
+              [r for snap in days for r in allowance_rows_for(snap)])
+    # Frueher gab es statt der Nutzungszeiten Apples Kategorien.
+    (DATA_DIR / "categories.csv").unlink(missing_ok=True)
 
     if days:
         newest = max(days, key=lambda s: s["_day"])

@@ -27,7 +27,7 @@ from datetime import datetime, timedelta
 import websockets
 
 from config import UNATTRIBUTED_TITLE
-from exporter import (CATEGORY_LABELS, PREFIX, label, load_apple_categories,
+from exporter import (CATEGORY_LABELS, PREFIX, label, load_allowances,
                       load_data, slugify, watched_apps)
 
 HA_URL = os.getenv("HA_URL", "http://localhost:8123")
@@ -69,17 +69,17 @@ def daily_totals(rows: list[dict]) -> dict:
         if not UI_MODE:
             out[f"device_{slugify(r.get('source') or 'unknown')}"][day] += minutes
         # Rundungsrest zaehlt zur Gesamtzeit, aber zu keiner Kategorie. Mit der
-        # Quelle "ui" kommen die Kategorien direkt von Apple (s. unten).
+        # Quelle "ui" gibt es keine Kategorien, sondern Nutzungszeiten (s. unten).
         if not UI_MODE and r["title"] != UNATTRIBUTED_TITLE:
             out[f"cat_{slugify(r.get('category') or 'Other')}"][day] += minutes
         if r["title"] in watched:
             out[f"app_{slugify(r['title'])}"][day] += minutes
     if UI_MODE:
-        for day, cats in load_apple_categories().items():
+        for day, groups in load_allowances().items():
             if day < cutoff:
                 continue
-            for name, seconds in cats.items():
-                out[f"cat_{slugify(name)}"][day] += seconds / 60.0
+            for name, seconds in groups.items():
+                out[f"allowance_{slugify(name)}"][day] += seconds / 60.0
     return out
 
 
@@ -210,7 +210,7 @@ def main() -> int:
     totals = daily_totals(rows)
     series = []
     # Lesbare Namen fuer die Reihen: Apples Kategorienamen bzw. die App-Titel.
-    names = {f"cat_{slugify(n)}": n for day in load_apple_categories().values() for n in day}
+    names = {f"allowance_{slugify(n)}": f"Nutzungszeit {n}" for day in load_allowances().values() for n in day}
     names.update({f"cat_{slugify(k)}": v for k, v in CATEGORY_LABELS.items()})
     names.update({f"app_{slugify(a)}": a for a in watched_apps()})
     for suffix, day_values in sorted(totals.items()):

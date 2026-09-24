@@ -7,9 +7,11 @@ import ApplicationServices
 struct DaySnapshot: Codable {
     struct App: Codable { var bundleId: String; var name: String; var seconds: Int? }
     struct Web: Codable { var domain: String; var seconds: Int? }
-    /// Apples Kategorie mit fester Kennung (z. B. `DH1003` = Unterhaltung);
-    /// seit iOS 27 lassen sich auch eigene anlegen.
-    struct Category: Codable { var id: String; var name: String; var seconds: Int? }
+    /// Nutzungszeit (iOS 27, „Time Allowance“): Gruppe von Apps mit eigenem
+    /// Tageslimit. Feste Kennungen für Apples Gruppen (`alwaysAllowed`,
+    /// `default`, `entertainment`, `games`, …), UUIDs für selbst angelegte.
+    /// Jede App gehört zu genau einer Gruppe; zusammen ergeben sie die Gesamtzeit.
+    struct Allowance: Codable { var id: String; var name: String; var seconds: Int? }
 
     var child: String
     var date: String            // yyyy-MM-dd
@@ -19,7 +21,7 @@ struct DaySnapshot: Codable {
     var totalSeconds: Int?
     var apps: [App]
     var web: [Web]
-    var categories: [Category]
+    var allowances: [Allowance]
     var pickups: [String]
     var readAt: String
 }
@@ -64,7 +66,7 @@ final class ScreenTimeReader {
 
     /// Einträge im Menü „Darstellungsoptionen“ über der Liste.
     private static let appsMode = "Apps & Websites"
-    private static let categoriesMode = "App-Kategorien"
+    private static let allowancesMode = "Nutzungszeiten"
     private static let bundleID = "com.apple.systempreferences"
 
     private let log: (String) -> Void
@@ -351,24 +353,25 @@ final class ScreenTimeReader {
             }
         }
 
-        // … dann Apples Kategorien.
-        try setListMode(Self.categoriesMode)
+        // … dann die Nutzungszeiten.
+        try setListMode(Self.allowancesMode)
         expandList()
-        var categories: [DaySnapshot.Category] = []
+        var allowances: [DaySnapshot.Allowance] = []
+        let groupPrefix = "progress-bar-timeAllowanceGroup:"
         for el in all() {
-            guard let id = ident(el), id.hasPrefix("progress-bar-category:"), let d = desc(el) else { continue }
+            guard let id = ident(el), id.hasPrefix(groupPrefix), let d = desc(el) else { continue }
             let (name, secs) = Self.nameAndSeconds(d)
-            categories.append(.init(id: String(id.dropFirst("progress-bar-category:".count)), name: name, seconds: secs))
+            allowances.append(.init(id: String(id.dropFirst(groupPrefix.count)), name: name, seconds: secs))
         }
 
         // Lieber keine Zahlen als falsche: in der Wochenansicht lägen einzelne
         // Einträge über der vermeintlichen Tagessumme.
-        let maxEntry = (apps.compactMap(\.seconds) + categories.compactMap(\.seconds)).max() ?? 0
+        let maxEntry = (apps.compactMap(\.seconds) + allowances.compactMap(\.seconds)).max() ?? 0
         if let total, maxEntry > total + 60 {
             throw ScreenTimeReaderError.implausible("Eintrag \(maxEntry) s über Tagessumme \(total) s")
         }
-        if let total, total >= 120, categories.isEmpty {
-            throw ScreenTimeReaderError.implausible("\(total / 60) min Nutzung, aber keine Kategorien")
+        if let total, total >= 120, allowances.isEmpty {
+            throw ScreenTimeReaderError.implausible("\(total / 60) min Nutzung, aber keine Nutzungszeiten")
         }
 
         let device = els.first { role($0) == "AXPopUpButton" && ident($0) == nil }.flatMap(value) ?? "?"
@@ -377,10 +380,10 @@ final class ScreenTimeReader {
 
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd"
-        log("\(child): \(label) – \(apps.count) Apps, \(categories.count) Kategorien, gesamt \(total.map { "\($0 / 60) min" } ?? "?")")
+        log("\(child): \(label) – \(apps.count) Apps, \(allowances.count) Nutzungszeiten, gesamt \(total.map { "\($0 / 60) min" } ?? "?")")
         return DaySnapshot(
             child: child, date: f.string(from: day), label: label, appleUpdated: updated, device: device,
-            totalSeconds: total, apps: apps, web: web, categories: categories,
+            totalSeconds: total, apps: apps, web: web, allowances: allowances,
             pickups: values("activity-legend-pickups", in: els),
             readAt: ISO8601DateFormatter().string(from: Date()))
     }

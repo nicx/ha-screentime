@@ -52,7 +52,7 @@ struct SettingsView: View {
         Form {
             Section("Kinder") {
                 TextField("Namen", text: $settings.childNames, prompt: Text("z. B. Kind1, Kind2"))
-                Text("Kommagetrennt, so wie die Kinder unter Systemeinstellungen → Familie aufgeführt sind (der Teil vor dem Komma). Je Kind entstehen eigene Sensoren, z. B. sensor.screentime_kind1_total. Erfasst wird die Summe über alle Geräte des Kindes, samt Apples Kategorien.")
+                Text("Kommagetrennt, so wie die Kinder unter Systemeinstellungen → Familie aufgeführt sind (der Teil vor dem Komma). Je Kind entstehen eigene Sensoren, z. B. sensor.screentime_kind1_total. Erfasst wird die Summe über alle Geräte des Kindes, samt der Nutzungszeiten (App-Gruppen mit Tageslimit).")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -72,7 +72,7 @@ struct SettingsView: View {
             Section("Eigene Sensoren für einzelne Apps") {
                 TextField("Beobachtete Apps", text: $settings.watchedApps, axis: .vertical)
                     .lineLimit(2...5)
-                Text("Kommagetrennt, z. B. „YouTube, ChatGPT“. Jede bekommt je Kind einen eigenen Sensor (sensor.screentime_kind1_app_youtube) — auch an Tagen mit 0 Minuten, damit der Verlauf keine Lücken bekommt. Apples Kategorien bekommen automatisch eigene Sensoren.")
+                Text("Kommagetrennt, z. B. „YouTube, ChatGPT“. Jede bekommt je Kind einen eigenen Sensor (sensor.screentime_kind1_app_youtube) — auch an Tagen mit 0 Minuten, damit der Verlauf keine Lücken bekommt. Jede Nutzungszeit bekommt automatisch einen eigenen Sensor.")
                     .font(.caption).foregroundStyle(.secondary)
 
                 let seen = runner.statuses.values

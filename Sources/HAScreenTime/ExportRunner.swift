@@ -7,7 +7,7 @@ struct RunStatus: Codable, Equatable {
     var topAppMinutes: Double
     var sessionCount: Int
     var byDevice: [String: Double]
-    var byCategory: [String: Double]
+    var byAllowance: [String: Double]
     var byApp: [String: Double]
     var updatedAt: String
     var date: String
@@ -18,7 +18,7 @@ struct RunStatus: Codable, Equatable {
         case topAppMinutes = "top_app_minutes"
         case sessionCount = "session_count"
         case byDevice = "by_device"
-        case byCategory = "by_category"
+        case byAllowance = "by_allowance"
         case byApp = "by_app"
         case updatedAt = "updated_at"
         case date
@@ -410,9 +410,9 @@ final class ExportRunner: ObservableObject {
                 out += "  \(name): \(format(minutes))\n"
             }
         }
-        if !status.byCategory.isEmpty {
-            out += "\nKategorien:\n"
-            for (name, minutes) in status.byCategory.sorted(by: { $0.value > $1.value }) {
+        if !status.byAllowance.isEmpty {
+            out += "\nNutzungszeiten:\n"
+            for (name, minutes) in status.byAllowance.sorted(by: { $0.value > $1.value }) {
                 out += "  \(name): \(format(minutes))\n"
             }
         }
