@@ -137,6 +137,26 @@ func first(id: String) -> AXUIElement? { all().first { ident($0) == id } }
 _ = waitFor("Fenster der Systemeinstellungen", timeout: 15) { windows().first }
     ?? { fail("Kein Fenster der Systemeinstellungen") }()
 
+/// Ansichten schliessen und selbst gestartete Systemeinstellungen beenden --
+/// auch im Fehlerfall, damit kein halb geoeffneter Dialog stehen bleibt.
+func cleanup() {
+    for _ in 0..<3 {
+        // Der innerste Dialog steht in Dokumentreihenfolge zuletzt.
+        guard let done = all().last(where: { role($0) == "AXButton" && desc($0) == "Fertig" }) else { break }
+        press(done, "Fertig")
+        Thread.sleep(forTimeInterval: 0.6)
+    }
+    if launchedByUs {
+        settingsApp?.terminate()
+        log("Systemeinstellungen wieder beendet")
+    }
+}
+
+func bail(_ s: String, code: Int32 = 1) -> Never {
+    cleanup()
+    fail(s, code: code)
+}
+
 // MARK: - Navigation (jeder Schritt wird uebersprungen, wenn er schon erreicht ist)
 
 func detailOpen() -> AXUIElement? { first(id: "day-picker-segment") }
@@ -163,31 +183,58 @@ if detailOpen() == nil {
         }
         if memberRow() == nil {
             guard let fam = waitFor("Familie in der Seitenleiste", { first(id: "com.apple.settings.family") }) else {
-                fail("Eintrag 'Familie' nicht gefunden")
+                bail("Eintrag 'Familie' nicht gefunden")
             }
             selectSidebar(fam)
         }
         guard let row = waitFor("Familienmitglied \(childName)", memberRow) else {
-            fail("Familienmitglied '\(childName)' nicht gefunden")
+            bail("Familienmitglied '\(childName)' nicht gefunden")
         }
         press(row, "Familienmitglied \(childName)")
         overview = waitFor("Bildschirmzeit-Uebersicht") { first(id: "weekly-usage-summary-chart") }
     }
-    guard let ov = overview else { fail("Bildschirmzeit-Uebersicht nicht erreicht") }
-    press(ov, "Bildschirmzeit-Uebersicht")
-    if waitFor("Detailansicht", timeout: 6, detailOpen) == nil,
-       let alt = first(id: "most-used-header-link") {
-        press(alt, "Am haeufigsten verwendet")
+    guard overview != nil else { bail("Bildschirmzeit-Uebersicht nicht erreicht") }
+    // Bevorzugt ueber "Heute am haeufigsten verwendet" einsteigen -- das
+    // Wochendiagramm oeffnet die Detailansicht in der Wochenansicht.
+    if let link = first(id: "most-used-header-link") {
+        press(link, "Heute am haeufigsten verwendet")
+    } else if let ov = overview {
+        press(ov, "Bildschirmzeit-Uebersicht")
     }
-    guard waitFor("Detailansicht", detailOpen) != nil else { fail("Detailansicht nicht erreicht") }
+    if waitFor("Detailansicht", timeout: 6, detailOpen) == nil, let ov = first(id: "weekly-usage-summary-chart") {
+        press(ov, "Bildschirmzeit-Uebersicht (Ersatzweg)")
+    }
+    guard waitFor("Detailansicht", detailOpen) != nil else { bail("Detailansicht nicht erreicht") }
 }
 
 // MARK: - Ansicht einstellen: Tag, Heute, Geraet
 
-if let day = first(id: "day-picker-segment"), value(day) != "1" {
-    press(day, "Tag")
-    Thread.sleep(forTimeInterval: 0.8)
+/// Tagesansicht erzwingen und das Ergebnis pruefen -- ein gedrueckter Knopf
+/// heisst noch nicht, dass die Ansicht umgeschaltet hat (so geschehen im ersten Test).
+func ensureDayMode() -> Bool {
+    for attempt in 1...3 {
+        guard let seg = first(id: "day-picker-segment") else { return false }
+        if value(seg) == "1" { return true }
+        switch attempt {
+        case 1: press(seg, "Tag")
+        case 2:
+            AXUIElementSetAttributeValue(seg, kAXValueAttribute as CFString, 1 as CFNumber)
+            log("Tag per Wert gesetzt")
+        default:
+            AXUIElementSetAttributeValue(seg, kAXSelectedAttribute as CFString, kCFBooleanTrue)
+            log("Tag per Auswahl gesetzt")
+        }
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline {
+            if let s = first(id: "day-picker-segment"), value(s) == "1" { return true }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+    }
+    return false
 }
+guard ensureDayMode() else { bail("Tagesansicht laesst sich nicht einstellen", code: 3) }
+Thread.sleep(forTimeInterval: 0.8)
+
 if let today = first(id: "today-button") {
     press(today, "Heute")          // schlaegt fehl, wenn schon "Heute" -- harmlos
     Thread.sleep(forTimeInterval: 0.5)
@@ -256,6 +303,19 @@ for el in els {
 let updated = els.compactMap { role($0) == "AXStaticText" ? value($0) : nil }.first { $0.contains("aktualisiert") }
 let pickups = values(id: "activity-legend-pickups")
 
+// Plausibilitaet: lieber keine Zahlen als falsche. Die Wochenansicht verraet
+// sich am Beschriftungstext und daran, dass einzelne Apps die "Tagessumme"
+// (dort der Tagesdurchschnitt) uebersteigen.
+let dayValue = first(id: "day-picker-segment").flatMap(value)
+let totalSecs = totalText.flatMap(seconds)
+let maxApp = apps.compactMap { $0["seconds"] as? Int }.max() ?? 0
+if dayValue != "1" || (dateLabel ?? "").lowercased().contains("durchschnitt") {
+    bail("Nicht in der Tagesansicht (Tag=\(dayValue ?? "?"), Beschriftung '\(dateLabel ?? "?")')", code: 4)
+}
+if let t = totalSecs, maxApp > t + 60 {
+    bail("Unplausibel: eine App (\(maxApp) s) liegt ueber der Tagessumme (\(t) s)", code: 4)
+}
+
 let result: [String: Any] = [
     "child": childName,
     "device": device,
@@ -271,18 +331,7 @@ let result: [String: Any] = [
     "elapsed_seconds": (Date().timeIntervalSince(started) * 10).rounded() / 10,
 ]
 
-// MARK: - Aufraeumen: Ansichten schliessen, selbst gestartete App beenden
-
-for _ in 0..<3 {
-    // Der innerste Dialog steht in Dokumentreihenfolge zuletzt.
-    guard let done = all().last(where: { role($0) == "AXButton" && desc($0) == "Fertig" }) else { break }
-    press(done, "Fertig")
-    Thread.sleep(forTimeInterval: 0.6)
-}
-if launchedByUs {
-    settingsApp?.terminate()
-    log("Systemeinstellungen wieder beendet")
-}
+cleanup()
 
 let json = try! JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
 print(String(decoding: json, as: UTF8.self))
