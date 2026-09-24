@@ -14,7 +14,7 @@ from pathlib import Path
 from collections import defaultdict
 from dotenv import load_dotenv
 
-from config import CATEGORIES, TITLE_NORMALIZE, get_category
+from config import CATEGORIES, TITLE_NORMALIZE, UNATTRIBUTED_TITLE, get_category
 
 # Load .env from parent directory
 load_dotenv(Path(__file__).parent.parent / ".env")
@@ -49,12 +49,55 @@ STATUS_FILE = DATA_DIR / "status.json"
 # unklar, WARUM keine Daten ankommen.
 DIAG_FILE = DATA_DIR / "diagnostics.json"
 
+# Quelle "ui": die App liest die Bildschirmzeit aus den Systemeinstellungen,
+# summiert ueber alle Geraete des Kindes. Eine Aufteilung nach Geraet gibt es
+# dort nicht, also auch keine Geraetesensoren.
+UI_MODE = os.getenv("SCREENTIME_SOURCE") == "ui"
+
+# Ab diesem Alter des letzten erfolgreichen Auslesens gilt die Erfassung als veraltet.
+UI_STALE_HOURS = 3
+
+
+def export_ui_diagnostics(diag: dict) -> None:
+    """Diagnose fuer die Quelle "ui" (schreibt die Menueleisten-App)."""
+    last = diag.get("letzter_erfolg")
+    age_h = None
+    if last:
+        try:
+            age_h = round((datetime.now(timezone.utc)
+                           - datetime.fromisoformat(last.replace("Z", "+00:00"))).total_seconds() / 3600, 1)
+        except ValueError:
+            pass
+    attrs = {
+        "friendly_name": "Bildschirmzeit Diagnose",
+        "icon": "mdi:stethoscope",
+        "quelle": "Systemeinstellungen (Familie → Bildschirmzeit)",
+        "geprueft_am": diag.get("written_at"),
+        "letzter_erfolg": last,
+        "alter_letzter_erfolg (h)": age_h,
+        "apple_aktualisiert": diag.get("apple_aktualisiert"),
+        "geraet": diag.get("geraet"),
+        "tage_gelesen": ", ".join(diag.get("tage_gelesen") or []) or None,
+        "dauer (s)": diag.get("dauer_s"),
+        "fehler": diag.get("fehler"),
+    }
+    if diag.get("hard_error"):
+        state = "Fehler"
+    elif age_h is None or age_h > UI_STALE_HOURS:
+        state = "veraltet"
+    else:
+        state = "ok"
+    update_ha_sensor("sensor.screentime_diagnose", state, attrs, None, state_class=None)
+
 
 def export_diagnostics() -> None:
     """Spiegelt diagnostics.json als sensor.screentime_diagnose nach HA."""
     try:
         diag = json.loads(DIAG_FILE.read_text())
     except Exception:
+        return
+    if diag.get("quelle") == "ui":
+        export_ui_diagnostics(diag)
         return
 
     attrs = {
@@ -305,12 +348,15 @@ def calculate_daily_aggregates(rows: list[dict], target_date=None) -> dict:
 
     total_seconds = sum(r["duration"] for r in day_rows)
 
-    by_device = {k: round(v / 60, 1) for k, v in sum_by("source").items()}
+    by_device = {} if UI_MODE else {k: round(v / 60, 1) for k, v in sum_by("source").items()}
     by_category = {k: round(v / 60, 1) for k, v in sum_by("category").items()}
 
     app_totals = sorted(sum_by("title").items(), key=lambda kv: kv[1], reverse=True)
-    top_app, top_app_seconds = app_totals[0] if app_totals else ("Unknown", 0.0)
-    by_app = {k: round(v / 60, 1) for k, v in app_totals[:10]}
+    # "Nicht zugeordnet" ist Rundungsrest, keine App: zaehlt zur Gesamtzeit,
+    # aber nicht als Top-App oder in der Top-Liste.
+    real_apps = [kv for kv in app_totals if kv[0] != UNATTRIBUTED_TITLE]
+    top_app, top_app_seconds = real_apps[0] if real_apps else ("Unknown", 0.0)
+    by_app = {k: round(v / 60, 1) for k, v in real_apps[:10]}
     # Vollständig, nicht nur Top 10: eine beobachtete App kann außerhalb der
     # Top 10 liegen und stünde sonst fälschlich auf 0.
     by_app_all = {k: round(v / 60, 1) for k, v in app_totals}
@@ -428,7 +474,7 @@ def export_to_homeassistant(rows: list[dict]) -> bool:
     # Sonst verschwindet die Entity an Tagen ohne Nutzung und reißt Lücken
     # in Dashboard und Verlauf.
     by_device = dict(aggregates["by_device"])
-    for entry in os.getenv("DEVICES", "").split(","):
+    for entry in ("" if UI_MODE else os.getenv("DEVICES", "")).split(","):
         entry = entry.strip()
         if ":" in entry:
             configured_name = entry.split(":", 1)[0].strip()

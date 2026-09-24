@@ -4,14 +4,13 @@ struct SettingsView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var runner: ExportRunner
     @EnvironmentObject private var loginItem: LoginItemManager
-    @EnvironmentObject private var scanner: DeviceScanner
 
     @State private var mailTestResult: String?
 
     var body: some View {
         TabView {
             generalTab.tabItem { Label("Allgemein", systemImage: "gearshape") }
-            devicesTab.tabItem { Label("Geräte", systemImage: "iphone") }
+            captureTab.tabItem { Label("Erfassung", systemImage: "person.crop.circle") }
             notifyTab.tabItem { Label("Benachrichtigung", systemImage: "envelope") }
         }
         .frame(width: 520)
@@ -47,14 +46,26 @@ struct SettingsView: View {
         .formStyle(.grouped)
     }
 
-    // MARK: Geräte
+    // MARK: Erfassung
 
-    private var devicesTab: some View {
+    private var captureTab: some View {
         Form {
-            Section("Zu erfassende Geräte") {
-                TextField("Geräte", text: $settings.devices, axis: .vertical)
-                    .lineLimit(3...6)
-                Text("Format: Name:UUID, Name:UUID — der Name bestimmt die Entity-ID in Home Assistant (z. B. „Kind iPhone“ → sensor.screentime_kind_iphone).")
+            Section("Kind") {
+                TextField("Name", text: $settings.childName, prompt: Text("z. B. Kind"))
+                Text("So, wie das Kind unter Systemeinstellungen → Familie aufgeführt ist (der Teil vor dem Komma). Erfasst wird die Summe über alle Geräte des Kindes, so wie Apples Bildschirmzeit sie anzeigt.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Berechtigung") {
+                if ScreenTimeReader.isTrusted {
+                    Label("Bedienungshilfen freigegeben", systemImage: "checkmark.circle")
+                        .foregroundStyle(.green)
+                } else {
+                    Label("Bedienungshilfen nicht freigegeben", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                    Button("Freigabe anfordern…") { ScreenTimeReader.requestTrust() }
+                }
+                Text("Die App liest die Werte aus den Systemeinstellungen (Familie → Bildschirmzeit). Dafür öffnet sie diese kurz im Hintergrund und schließt sie wieder. Sind die Systemeinstellungen gerade geöffnet, wird der Lauf ausgelassen.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -73,56 +84,6 @@ struct SettingsView: View {
                                 .buttonStyle(.link)
                                 .disabled(settings.watchedApps.contains(name))
                         }
-                    }
-                }
-            }
-
-            Section("Dieser Mac") {
-                Toggle("Nutzung dieses Macs mitzählen", isOn: $settings.collectMac)
-                Text("Standard aus: dieser Mac sammelt nur, seine eigene „Nutzung“ sind Wartungssitzungen und würde die Werte verfälschen.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-
-            Section("Geräte-IDs ermitteln") {
-                HStack {
-                    Button("Geräte suchen") {
-                        Task { await scanner.scan() }
-                    }
-                    .disabled(scanner.isScanning)
-                    if scanner.isScanning {
-                        ProgressView().controlSize(.small)
-                        Text("suche…").font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-
-                if let err = scanner.error {
-                    Text(err).font(.caption).foregroundStyle(.red)
-                }
-
-                if !scanner.devices.isEmpty {
-                    Text("Die Gerätenamen sind bei Apple meist leer — erkennbar sind die Geräte an ihren Apps.")
-                        .font(.caption).foregroundStyle(.secondary)
-
-                    ForEach(scanner.devices) { device in
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack {
-                                Text("\(device.platformName) · \(device.events) Ereignisse")
-                                    .font(.callout)
-                                Spacer()
-                                Button("Übernehmen") { add(device) }
-                                    .disabled(settings.devices.contains(device.deviceId))
-                            }
-                            if !device.topAppsSummary.isEmpty {
-                                Text(device.topAppsSummary)
-                                    .font(.caption).foregroundStyle(.secondary)
-                                    .lineLimit(2)
-                            }
-                            Text(device.deviceId)
-                                .font(.system(.caption2, design: .monospaced))
-                                .foregroundStyle(.tertiary)
-                                .textSelection(.enabled)
-                        }
-                        .padding(.vertical, 2)
                     }
                 }
             }
@@ -167,21 +128,11 @@ struct SettingsView: View {
             }
 
             Section {
-                Text("Der Ausfall der Erfassung selbst (z. B. weil dieser Benutzer nach einem Neustart nicht angemeldet wurde) kann die App nicht melden — dann läuft sie ja nicht. Das übernimmt eine Automation in Home Assistant, die prüft, ob die Sensoren noch aktualisiert werden.")
+                Text("Der Ausfall der Erfassung selbst (z. B. weil nach einem Neustart niemand angemeldet ist) kann die App nicht melden — dann läuft sie ja nicht. Das übernimmt eine Automation in Home Assistant, die prüft, ob die Sensoren noch aktualisiert werden.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
-    }
-
-    /// Ein gefundenes Gerät in die Konfiguration übernehmen. Der Name ist ein
-    /// Vorschlag (z.B. "iPhone") und bestimmt die Entity-ID in Home Assistant —
-    /// er lässt sich im Textfeld darüber anpassen.
-    private func add(_ device: ScannedDevice) {
-        let name = device.platformName
-        let entry = "\(name):\(device.deviceId)"
-        let current = settings.devices.trimmingCharacters(in: .whitespacesAndNewlines)
-        settings.devices = current.isEmpty ? entry : current + "," + entry
     }
 
     /// Eine App in die Beobachtungsliste aufnehmen.

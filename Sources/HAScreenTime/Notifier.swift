@@ -13,6 +13,10 @@ enum ScreenTimeConditions {
         id: "run",
         problemSubject: "Screen Time: Lauf fehlgeschlagen",
         recoverySubject: "Screen Time: Lauf wieder erfolgreich")
+    static let read = NotifierCondition(
+        id: "read",
+        problemSubject: "Screen Time: Auslesen der Bildschirmzeit fehlgeschlagen",
+        recoverySubject: "Screen Time: Auslesen klappt wieder")
     static let dataFlow = NotifierCondition(
         id: "data_flow",
         problemSubject: "Screen Time: keine neuen Daten",

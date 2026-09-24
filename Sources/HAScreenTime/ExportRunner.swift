@@ -143,8 +143,13 @@ final class ExportRunner: ObservableObject {
         state = .running
         log.appendSystem("Lauf gestartet (\(trigger))")
 
-        try? FileManager.default.createDirectory(at: BundledRuntime.dataDirectory,
+        try? FileManager.default.createDirectory(at: Self.daysDirectory,
                                                  withIntermediateDirectories: true)
+
+        // Erst auslesen, dann exportieren. Scheitert das Auslesen, laeuft der
+        // Export trotzdem mit den vorhandenen Tageswerten -- sonst verschwaenden
+        // die per REST gesetzten Sensoren nach dem naechsten HA-Neustart.
+        let readProblem = await readScreenTime()
 
         let result = await execute()
         lastRun = Date()
@@ -155,7 +160,7 @@ final class ExportRunner: ObservableObject {
         if Updater.applyIfAvailable(log: log) { return }
 
         if result.exitCode == 0 {
-            state = .ok
+            state = readProblem.map { .failed($0) } ?? .ok
             lastSuccess = Date()
             status = Self.readStatus()
             notifier.report(ScreenTimeConditions.run, healthy: true)
@@ -169,6 +174,101 @@ final class ExportRunner: ObservableObject {
             notifier.report(ScreenTimeConditions.run, healthy: false, detail: detail)
         }
     }
+
+    // MARK: - Auslesen der Bildschirmzeit
+
+    /// Wie viele vergangene Tage nachgeholt werden, falls sie fehlen (erster
+    /// Lauf, Ausfall). Reicht Apples Verlauf weniger weit, bricht der Leser
+    /// dort ab und behaelt, was er hat.
+    private static let backfillDays = 14
+
+    static var daysDirectory: URL { BundledRuntime.dataDirectory.appendingPathComponent("days", isDirectory: true) }
+    private static var diagnosticsURL: URL { BundledRuntime.dataDirectory.appendingPathComponent("diagnostics.json") }
+    private static let lastReadSuccessKey = "lastUIReadSuccess"
+
+    private static func dayKey(offset: Int) -> String {
+        let day = Calendar.current.date(byAdding: .day, value: -offset, to: Date())!
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: day)
+    }
+
+    private static func dayFile(_ key: String) -> URL { daysDirectory.appendingPathComponent("\(key).json") }
+
+    /// Heute immer; den Vortag bis 6 Uhr erneut (Apple meldet die Abendnutzung
+    /// oft verspaetet); dazu jeden fehlenden Tag der letzten zwei Wochen.
+    private func dayOffsetsToRead() -> [Int] {
+        var offsets: Set<Int> = [0]
+        if Calendar.current.component(.hour, from: Date()) < 6 { offsets.insert(1) }
+        for off in 1...Self.backfillDays
+        where !FileManager.default.fileExists(atPath: Self.dayFile(Self.dayKey(offset: off)).path) {
+            offsets.insert(off)
+        }
+        return offsets.sorted()
+    }
+
+    /// Liest die Bildschirmzeit aus den Systemeinstellungen und legt je Tag eine
+    /// Datei ab. Rueckgabe: Fehlermeldung fuer die Statusanzeige, sonst nil.
+    private func readScreenTime() async -> String? {
+        let child = settings.trimmedChildName
+        let offsets = dayOffsetsToRead()
+        let logSink: (String) -> Void = { [weak self] line in
+            Task { @MainActor in self?.log.appendSystem(line) }
+        }
+        let started = Date()
+        log.appendSystem("Lese Bildschirmzeit: \(offsets.count == 1 ? "heute" : "\(offsets.count) Tage")")
+
+        let outcome: Result<[DaySnapshot], Error> = await Task.detached(priority: .utility) {
+            Result { try ScreenTimeReader(child: child, log: logSink).read(dayOffsets: offsets) }
+        }.value
+
+        var diag: [String: Any] = [
+            "quelle": "ui",
+            "written_at": ISO8601DateFormatter().string(from: Date()),
+            "dauer_s": (Date().timeIntervalSince(started) * 10).rounded() / 10,
+            "hard_error": false,
+        ]
+
+        let problem: String?
+        switch outcome {
+        case .success(let snapshots):
+            let enc = JSONEncoder()
+            enc.keyEncodingStrategy = .convertToSnakeCase
+            enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+            for snap in snapshots {
+                if let data = try? enc.encode(snap) {
+                    try? data.write(to: Self.dayFile(snap.date), options: .atomic)
+                }
+            }
+            UserDefaults.standard.set(Date(), forKey: Self.lastReadSuccessKey)
+            diag["tage_gelesen"] = snapshots.map(\.date)
+            diag["apple_aktualisiert"] = snapshots.first?.appleUpdated
+            diag["geraet"] = snapshots.first?.device
+            notifier.report(ScreenTimeConditions.read, healthy: true)
+            problem = nil
+        case .failure(let error):
+            let message = error.localizedDescription
+            log.appendSystem("Auslesen: \(message)")
+            diag["fehler"] = message
+            if case ScreenTimeReaderError.settingsInUse = error {
+                // Kein Fehler: jemand benutzt gerade die Systemeinstellungen.
+                problem = nil
+            } else {
+                diag["hard_error"] = true
+                notifier.report(ScreenTimeConditions.read, healthy: false, detail: message)
+                problem = message
+            }
+        }
+        if let last = UserDefaults.standard.object(forKey: Self.lastReadSuccessKey) as? Date {
+            diag["letzter_erfolg"] = ISO8601DateFormatter().string(from: last)
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: diag, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: Self.diagnosticsURL, options: .atomic)
+        }
+        return problem
+    }
+
+    // MARK: - Python-Lauf
 
     private func execute() async -> (exitCode: Int32, tail: String) {
         let proc = Process()

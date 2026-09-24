@@ -5,6 +5,10 @@ Edit this file to customize app names and categories.
 """
 
 # Bundle ID → Display Name (for Mac data from knowledgeC.db)
+# Differenz zwischen Apples Tagessumme und der Summe der (auf Minuten
+# abgerundeten) App-Werte; eigene Zeile, damit die Gesamtzeit Apples Wert trifft.
+UNATTRIBUTED_TITLE = "Nicht zugeordnet"
+
 APP_MAP = {
     # Social
     "com.hammerandchisel.discord": "Discord",

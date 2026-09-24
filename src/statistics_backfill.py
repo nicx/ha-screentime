@@ -37,6 +37,9 @@ DAYS_BACK = 35
 
 SOURCE = "hascreentime"
 
+# Quelle "ui": Summe ueber alle Geraete, keine Aufteilung nach Geraet.
+UI_MODE = os.getenv("SCREENTIME_SOURCE") == "ui"
+
 
 def websocket_url() -> str:
     url = HA_URL.rstrip("/")
@@ -61,14 +64,15 @@ def daily_totals(rows: list[dict]) -> dict:
             continue
         minutes = r["duration"] / 60.0
         out["total"][day] += minutes
-        out[f"device_{slugify(r.get('source') or 'unknown')}"][day] += minutes
+        if not UI_MODE:
+            out[f"device_{slugify(r.get('source') or 'unknown')}"][day] += minutes
         out[f"cat_{slugify(r.get('category') or 'Other')}"][day] += minutes
         if r["title"] in watched:
             out[f"app_{slugify(r['title'])}"][day] += minutes
     return out
 
 
-def build_series(day_values: dict, label: str) -> tuple[dict, list]:
+def build_series(day_values: dict, label: str, base: float = 0.0) -> tuple[dict, list]:
     """
     Baut Metadaten und Punkte für eine importierte Statistik.
 
@@ -83,7 +87,7 @@ def build_series(day_values: dict, label: str) -> tuple[dict, list]:
     start_day = min(day_values)
     end_day = max(day_values)
     stats = []
-    running = 0.0
+    running = base
     day = start_day
     while day <= end_day:
         running += round(day_values.get(day, 0.0), 2)
@@ -112,6 +116,27 @@ def build_series(day_values: dict, label: str) -> tuple[dict, list]:
     return meta, stats
 
 
+async def last_sum_before(ws, msg_id: int, statistic_id: str, day) -> float:
+    """Letzte in HA gespeicherte Summe vor `day` (0, wenn es keine gibt)."""
+    start = datetime.combine(day, datetime.min.time()).astimezone()
+    await ws.send(json.dumps({
+        "id": msg_id,
+        "type": "recorder/statistics_during_period",
+        "start_time": (start - timedelta(days=400)).isoformat(),
+        "end_time": start.isoformat(),
+        "statistic_ids": [statistic_id],
+        "period": "hour",
+        "types": ["sum"],
+    }))
+    while True:
+        resp = json.loads(await ws.recv())
+        if resp.get("id") == msg_id:
+            break
+    points = (resp.get("result") or {}).get(statistic_id) or []
+    sums = [p.get("sum") for p in points if p.get("sum") is not None]
+    return float(sums[-1]) if sums else 0.0
+
+
 async def push(series: list[tuple[str, str, dict]]) -> bool:
     if not HA_TOKEN:
         print("[Statistik] HA_TOKEN nicht gesetzt - übersprungen")
@@ -130,12 +155,18 @@ async def push(series: list[tuple[str, str, dict]]) -> bool:
                 return False
 
             msg_id = 0
+            imported = 0
             ok = True
             for suffix, label, day_values in series:
-                meta, stats = build_series(day_values, label)
+                if not day_values:
+                    continue
+                statistic_id = f"{SOURCE}:{suffix}"
+                msg_id += 1
+                base = await last_sum_before(ws, msg_id, statistic_id, min(day_values))
+                meta, stats = build_series(day_values, label, base)
                 if not stats:
                     continue
-                meta["statistic_id"] = f"{SOURCE}:{suffix}"
+                meta["statistic_id"] = statistic_id
                 msg_id += 1
                 await ws.send(json.dumps({
                     "id": msg_id,
@@ -150,7 +181,9 @@ async def push(series: list[tuple[str, str, dict]]) -> bool:
                 if not resp.get("success"):
                     print(f"[Statistik] {meta['statistic_id']}: {resp.get('error')}")
                     ok = False
-            print(f"[Statistik] {msg_id} Reihen à {len(stats)} Tage eingespielt")
+                else:
+                    imported += 1
+            print(f"[Statistik] {imported} Reihen eingespielt")
             return ok
     except Exception as e:
         print(f"[Statistik] Fehler: {e}")

@@ -6,7 +6,6 @@ import Foundation
 /// unter `Contents/Resources/`):
 /// ```
 /// Runtime/python/bin/python3                 relocatable CPython 3.13 (arm64)
-/// Runtime/python/bin/aw-import-screentime    Biome/SEGB-Parser (pip-installiert)
 /// Runtime/python/lib/python3.13/…            Stdlib + site-packages
 /// payload/run.py, payload/src/…              unser Collector/Exporter
 /// ```
@@ -20,15 +19,12 @@ enum BundledRuntime {
 
     enum RuntimeError: LocalizedError {
         case pythonMissing(String)
-        case awBinaryMissing(String)
         case payloadMissing(String)
 
         var errorDescription: String? {
             switch self {
             case .pythonMissing(let path):
                 return "Gebündelte Python-Runtime fehlt (\(path)). Scripts/bundle-runtime.sh ausführen."
-            case .awBinaryMissing(let path):
-                return "aw-import-screentime fehlt in der Runtime (\(path)). Scripts/bundle-runtime.sh ausführen."
             case .payloadMissing(let path):
                 return "run.py fehlt im Bundle (\(path))."
             }
@@ -74,12 +70,10 @@ enum BundledRuntime {
     }
 
     static var pythonURL: URL { runtimeRoot.appendingPathComponent("python/bin/python3") }
-    static var awBinaryURL: URL { runtimeRoot.appendingPathComponent("python/bin/aw-import-screentime") }
     static var runScriptURL: URL { payloadRoot.appendingPathComponent("run.py") }
 
     /// Schreibbares Datenverzeichnis im Benutzer-Home (CSV, Wasserzeichen, status.json).
-    /// Liegt bewusst im Home des ausführenden Benutzers — die App läuft in der
-    /// Sitzung, in der auch die Screen-Time-Daten synchronisiert werden.
+    /// Liegt bewusst im Home des ausführenden Benutzers.
     static var dataDirectory: URL {
         let base = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library")
@@ -91,9 +85,6 @@ enum BundledRuntime {
     static func validate() throws {
         guard FileManager.default.isExecutableFile(atPath: pythonURL.path) else {
             throw RuntimeError.pythonMissing(pythonURL.path)
-        }
-        guard FileManager.default.isExecutableFile(atPath: awBinaryURL.path) else {
-            throw RuntimeError.awBinaryMissing(awBinaryURL.path)
         }
         guard FileManager.default.fileExists(atPath: runScriptURL.path) else {
             throw RuntimeError.payloadMissing(runScriptURL.path)

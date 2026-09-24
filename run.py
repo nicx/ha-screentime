@@ -6,6 +6,7 @@ Apple Screen Time Exporter - Main Pipeline
 2. Exports to Home Assistant (and InfluxDB)
 """
 
+import os
 import subprocess
 import sys
 from datetime import datetime
@@ -39,8 +40,13 @@ def main():
     print(f"║  Apple Screen Time Exporter - {datetime.now().strftime('%Y-%m-%d %H:%M')}       ║")
     print(f"╚{'═'*62}╝")
 
-    # Step 1: Collect
-    collect_ok = run_script("collector.py", "Collecting Screen Time Data")
+    # Step 1: Collect. Die Menüleisten-App liest die Bildschirmzeit selbst aus den
+    # Systemeinstellungen (SCREENTIME_SOURCE=ui) -- über Biome kommen die Daten
+    # eines Kinder-Accounts seit iOS 27 nicht mehr an.
+    if os.getenv("SCREENTIME_SOURCE") == "ui":
+        collect_ok = run_script("ui_import.py", "Tageswerte aus den Systemeinstellungen")
+    else:
+        collect_ok = run_script("collector.py", "Collecting Screen Time Data")
     if not collect_ok:
         print("\n[WARN] Collection had issues, trying export anyway...")
 

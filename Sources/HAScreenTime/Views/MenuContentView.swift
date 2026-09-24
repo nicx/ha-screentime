@@ -25,6 +25,10 @@ struct MenuContentView: View {
             Text("Noch keine Daten für heute")
         }
 
+        if !ScreenTimeReader.isTrusted {
+            Button("⚠︎ Bedienungshilfen freigeben…") { ScreenTimeReader.requestTrust() }
+        }
+
         Divider()
 
         Button("Jetzt aktualisieren") {

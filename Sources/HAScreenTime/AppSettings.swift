@@ -4,10 +4,8 @@ import SwiftUI
 /// Alle Einstellungen, gespeichert in `UserDefaults` des ausführenden Benutzers
 /// (`~/Library/Preferences/de.nicx.hascreentime.plist`).
 ///
-/// Bewusst hier und nicht in einer `.env`: die App läuft im Sammel-Benutzer,
-/// dessen Preferences nur für ihn selbst lesbar sind — eine `.env` müsste dagegen
-/// in einem für alle lesbaren Verzeichnis liegen (der HA-Token ist ein Vollzugriff
-/// auf Home Assistant).
+/// Bewusst hier und nicht in einer `.env`: der HA-Token ist ein Vollzugriff auf
+/// Home Assistant und gehört nicht in eine Datei neben die App.
 @MainActor
 final class AppSettings: ObservableObject {
 
@@ -15,9 +13,9 @@ final class AppSettings: ObservableObject {
     @AppStorage("haURL") var haURL: String = "http://localhost:8123"
     @AppStorage("haToken") var haToken: String = ""
 
-    /// Geräte im Format `Name:UUID,Name:UUID` — identisch zur `DEVICES`-Variable
-    /// des Python-Teils, wird unverändert durchgereicht.
-    @AppStorage("devices") var devices: String = ""
+    /// Name des Kindes, wie er unter Systemeinstellungen → Familie steht
+    /// (nur der Vorname vor dem Komma, z. B. „Kind“ aus „Kind, Alter: 12“).
+    @AppStorage("childName") var childName: String = ""
 
     /// Apps, die eigene Sensoren bekommen (kommagetrennt, Anzeigenamen wie in
     /// den Top-Apps). Bewusst eine feste Auswahl statt "jede gesehene App":
@@ -25,13 +23,9 @@ final class AppSettings: ObservableObject {
     /// gehen, und blähen den Recorder auf.
     @AppStorage("watchedApps") var watchedApps: String = ""
 
-    /// Nutzung des Macs mitzählen, auf dem gesammelt wird. Standard aus: dieser
-    /// Mac ist nur Sammelstelle, seine „Nutzung“ sind Wartungssitzungen.
-    @AppStorage("collectMac") var collectMac: Bool = false
-
     // MARK: Zeitplan
     /// Intervall zwischen zwei Läufen in Minuten.
-    @AppStorage("intervalMinutes") var intervalMinutes: Int = 30
+    @AppStorage("intervalMinutes") var intervalMinutes: Int = 10
 
     // MARK: Benachrichtigungen
     @AppStorage("notifyOnProblem") var notifyOnProblem: Bool = true
@@ -52,10 +46,12 @@ final class AppSettings: ObservableObject {
     @AppStorage("mailSender") var mailSender: String = ""
     @AppStorage("mailRecipient") var mailRecipient: String = ""
 
+    var trimmedChildName: String { childName.trimmingCharacters(in: .whitespaces) }
+
     /// Auf Vollständigkeit prüfen, bevor ein Lauf startet.
     var configurationProblem: String? {
-        if devices.trimmingCharacters(in: .whitespaces).isEmpty {
-            return "Keine Geräte konfiguriert."
+        if trimmedChildName.isEmpty {
+            return "Kein Kind eingetragen."
         }
         if haToken.trimmingCharacters(in: .whitespaces).isEmpty {
             return "Kein Home-Assistant-Token hinterlegt."
@@ -73,18 +69,20 @@ final class AppSettings: ObservableObject {
         var env = ProcessInfo.processInfo.environment
         env["HA_URL"] = haURL.trimmingCharacters(in: .whitespaces)
         env["HA_TOKEN"] = haToken.trimmingCharacters(in: .whitespaces)
-        env["DEVICES"] = devices.trimmingCharacters(in: .whitespaces)
-        env["COLLECT_MAC"] = collectMac ? "true" : "false"
+        // Quelle sind die von der App gelesenen Tageswerte (data/days), nicht
+        // mehr Biome: dort kommen die Daten eines Kinder-Accounts seit iOS 27
+        // nicht mehr an.
+        env["SCREENTIME_SOURCE"] = "ui"
+        env["SCREENTIME_CHILD"] = trimmedChildName
         env["WATCHED_APPS"] = watchedApps.trimmingCharacters(in: .whitespaces)
         env["SCREENTIME_DATA_DIR"] = BundledRuntime.dataDirectory.path
-        env["SCREENTIME_AW_BIN"] = BundledRuntime.awBinaryURL.path
         // Ausgabe ungepuffert, damit das Log live mitläuft statt am Ende zu klumpen.
         env["PYTHONUNBUFFERED"] = "1"
         // Bytecode-Cache aus dem App-Bundle heraushalten: Python legt sonst
         // __pycache__-Dateien neben den Skripten und in der gebündelten Stdlib
         // an — das bricht bei jedem Lauf das Signatur-Siegel des Bundles
         // ("a sealed resource is missing or invalid") und gefährdet damit
-        // Berechtigungen wie den Festplattenvollzugriff.
+        // erteilte Berechtigungen.
         env["PYTHONPYCACHEPREFIX"] = BundledRuntime.dataDirectory
             .deletingLastPathComponent().appendingPathComponent("pycache").path
         return env
