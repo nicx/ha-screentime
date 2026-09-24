@@ -2,8 +2,8 @@
 #
 # st-axdump.sh — Machbarkeitstest "Bildschirmzeit-UI auslesen".
 #
-# 1. Systemeinstellungen -> Bildschirmzeit -> Kind waehlen -> Ansicht mit der
-#    App-Nutzung oeffnen (Zeitraum "Heute").
+# 1. Systemeinstellungen -> Familie -> Kind waehlen -> Bildschirmzeit mit der
+#    App-Nutzung oeffnen, "Alle Geraete", Zeitraum "Heute" (macOS 27).
 # 2. Im Terminal:  bash ~/Git/ha-screentime/Scripts/st-axdump.sh
 #
 # Liest nur, klickt nichts. Das Ergebnis enthaelt Nutzungsdaten und landet
