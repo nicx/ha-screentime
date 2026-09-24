@@ -42,13 +42,17 @@ enum Updater {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    /// Liegt eine andere Version bereit als die laufende?
+    /// Liegt eine neuere Version bereit als die laufende?
     static var updateAvailable: Bool {
         guard let staged = stagedBuildID else { return false }
         // Fehlt die eigene Kennung (Version von vor diesem Mechanismus), gilt
         // alles Bereitliegende als neuer.
         guard let running = runningBuildID else { return true }
-        return staged != running
+        // Nur vorwaerts: die Kennung ist JJJJMMTT-hhmmss und damit als Text
+        // sortierbar. Frueher genuegte "anders" -- ein direkt installierter
+        // Build haette sich dann beim ersten Lauf mit einem aelteren, noch
+        // bereitliegenden Stand ueberschrieben.
+        return staged > running
     }
 
     /// Prüft und wendet an. Gibt `true` zurück, wenn ein Neustart eingeleitet wurde.
