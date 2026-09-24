@@ -50,9 +50,9 @@ struct SettingsView: View {
 
     private var captureTab: some View {
         Form {
-            Section("Kind") {
-                TextField("Name", text: $settings.childName, prompt: Text("z. B. Kind"))
-                Text("So, wie das Kind unter Systemeinstellungen → Familie aufgeführt ist (der Teil vor dem Komma). Erfasst wird die Summe über alle Geräte des Kindes, so wie Apples Bildschirmzeit sie anzeigt.")
+            Section("Kinder") {
+                TextField("Namen", text: $settings.childNames, prompt: Text("z. B. Kind1, Kind2"))
+                Text("Kommagetrennt, so wie die Kinder unter Systemeinstellungen → Familie aufgeführt sind (der Teil vor dem Komma). Je Kind entstehen eigene Sensoren, z. B. sensor.screentime_kind1_total. Erfasst wird die Summe über alle Geräte des Kindes, samt Apples Kategorien.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -72,14 +72,17 @@ struct SettingsView: View {
             Section("Eigene Sensoren für einzelne Apps") {
                 TextField("Beobachtete Apps", text: $settings.watchedApps, axis: .vertical)
                     .lineLimit(2...5)
-                Text("Kommagetrennt, z. B. „YouTube, ChatGPT“. Jede bekommt einen eigenen Sensor (sensor.screentime_app_youtube) — auch an Tagen mit 0 Minuten, damit der Verlauf keine Lücken bekommt. Kategorien bekommen automatisch eigene Sensoren.")
+                Text("Kommagetrennt, z. B. „YouTube, ChatGPT“. Jede bekommt je Kind einen eigenen Sensor (sensor.screentime_kind1_app_youtube) — auch an Tagen mit 0 Minuten, damit der Verlauf keine Lücken bekommt. Apples Kategorien bekommen automatisch eigene Sensoren.")
                     .font(.caption).foregroundStyle(.secondary)
 
-                if let status = runner.status, !status.byApp.isEmpty {
+                let seen = runner.statuses.values
+                    .flatMap { $0.byApp }
+                    .reduce(into: [String: Double]()) { $0[$1.key, default: 0] += $1.value }
+                if !seen.isEmpty {
                     Text("Zuletzt gesehen — zum Hinzufügen klicken:")
                         .font(.caption).foregroundStyle(.secondary)
                     HStack {
-                        ForEach(status.byApp.sorted(by: { $0.value > $1.value }).prefix(5), id: \.key) { name, _ in
+                        ForEach(seen.sorted(by: { $0.value > $1.value }).prefix(5), id: \.key) { name, _ in
                             Button(name) { watch(name) }
                                 .buttonStyle(.link)
                                 .disabled(settings.watchedApps.contains(name))

@@ -80,7 +80,30 @@ enum BundledRuntime {
         return base.appendingPathComponent("HAScreenTime/data", isDirectory: true)
     }
 
-    static var statusFileURL: URL { dataDirectory.appendingPathComponent("status.json") }
+    /// Gemeinsame Diagnose aller Kinder (wird als sensor.screentime_diagnose gespiegelt).
+    static var diagnosticsURL: URL { dataDirectory.appendingPathComponent("diagnostics.json") }
+
+    /// Datenverzeichnis eines Kindes: Tagesdateien, CSV, status.json.
+    static func childDirectory(_ child: String) -> URL {
+        dataDirectory.appendingPathComponent("children/\(slug(child))", isDirectory: true)
+    }
+
+    static func statusFileURL(_ child: String) -> URL {
+        childDirectory(child).appendingPathComponent("status.json")
+    }
+
+    /// Namensteil fuer Entity-IDs -- dieselbe Regel wie `slugify` im Python-Teil:
+    /// Kleinbuchstaben, Umlaute ausgeschrieben, alles andere wird zu "_".
+    static func slug(_ name: String) -> String {
+        var s = name.lowercased()
+        for (from, to) in [("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")] {
+            s = s.replacingOccurrences(of: from, with: to)
+        }
+        s = s.folding(options: .diacriticInsensitive, locale: Locale(identifier: "en_US_POSIX"))
+        let mapped = s.unicodeScalars.map { ("a"..."z").contains($0) || ("0"..."9").contains($0) ? Character($0) : "_" }
+        let collapsed = String(mapped).split(separator: "_").joined(separator: "_")
+        return collapsed.isEmpty ? "unknown" : collapsed
+    }
 
     static func validate() throws {
         guard FileManager.default.isExecutableFile(atPath: pythonURL.path) else {

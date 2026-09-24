@@ -27,7 +27,8 @@ from datetime import datetime, timedelta
 import websockets
 
 from config import UNATTRIBUTED_TITLE
-from exporter import CATEGORY_LABELS, load_data, slugify, watched_apps
+from exporter import (CATEGORY_LABELS, PREFIX, label, load_apple_categories,
+                      load_data, slugify, watched_apps)
 
 HA_URL = os.getenv("HA_URL", "http://localhost:8123")
 HA_TOKEN = os.getenv("HA_TOKEN", "")
@@ -67,11 +68,18 @@ def daily_totals(rows: list[dict]) -> dict:
         out["total"][day] += minutes
         if not UI_MODE:
             out[f"device_{slugify(r.get('source') or 'unknown')}"][day] += minutes
-        # Rundungsrest zaehlt zur Gesamtzeit, aber zu keiner Kategorie.
-        if r["title"] != UNATTRIBUTED_TITLE:
+        # Rundungsrest zaehlt zur Gesamtzeit, aber zu keiner Kategorie. Mit der
+        # Quelle "ui" kommen die Kategorien direkt von Apple (s. unten).
+        if not UI_MODE and r["title"] != UNATTRIBUTED_TITLE:
             out[f"cat_{slugify(r.get('category') or 'Other')}"][day] += minutes
         if r["title"] in watched:
             out[f"app_{slugify(r['title'])}"][day] += minutes
+    if UI_MODE:
+        for day, cats in load_apple_categories().items():
+            if day < cutoff:
+                continue
+            for name, seconds in cats.items():
+                out[f"cat_{slugify(name)}"][day] += seconds / 60.0
     return out
 
 
@@ -163,7 +171,7 @@ async def push(series: list[tuple[str, str, dict]]) -> bool:
             for suffix, label, day_values in series:
                 if not day_values:
                     continue
-                statistic_id = f"{SOURCE}:{suffix}"
+                statistic_id = f"{SOURCE}:{PREFIX}{suffix}"
                 msg_id += 1
                 base = await last_sum_before(ws, msg_id, statistic_id, min(day_values))
                 meta, stats = build_series(day_values, label, base)
@@ -201,19 +209,18 @@ def main() -> int:
 
     totals = daily_totals(rows)
     series = []
+    # Lesbare Namen fuer die Reihen: Apples Kategorienamen bzw. die App-Titel.
+    names = {f"cat_{slugify(n)}": n for day in load_apple_categories().values() for n in day}
+    names.update({f"cat_{slugify(k)}": v for k, v in CATEGORY_LABELS.items()})
+    names.update({f"app_{slugify(a)}": a for a in watched_apps()})
     for suffix, day_values in sorted(totals.items()):
         if suffix == "total":
-            label = "Bildschirmzeit gesamt (täglich)"
+            text = "gesamt"
         elif suffix.startswith("device_"):
-            label = f"Bildschirmzeit {suffix[len('device_'):]} (täglich)"
-        elif suffix.startswith("cat_"):
-            raw = suffix[len("cat_"):]
-            pretty = next((v for k, v in CATEGORY_LABELS.items()
-                           if slugify(k) == raw), raw)
-            label = f"Bildschirmzeit {pretty} (täglich)"
+            text = suffix[len("device_"):]
         else:
-            label = f"Bildschirmzeit {suffix[len('app_'):]} (täglich)"
-        series.append((suffix, label, day_values))
+            text = names.get(suffix, suffix.split("_", 1)[1])
+        series.append((suffix, f"{label(text)} (täglich)", day_values))
 
     return 0 if asyncio.run(push(series)) else 1
 

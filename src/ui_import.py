@@ -5,10 +5,12 @@ Systemeinstellungen (Familie → Bildschirmzeit) liest.
 
 Warum ein eigener Weg: Seit iOS 27 bieten die Geräte eines Kinder-Accounts
 ihre App-Nutzung nicht mehr über Biome an (collector.py findet dort nichts
-mehr). Die App legt stattdessen je Tag eine Datei data/days/<datum>.json ab.
+mehr). Die App legt stattdessen je Kind und Tag eine Datei
+children/<kind>/days/<datum>.json ab; dieser Lauf bekommt das Verzeichnis des
+Kindes als SCREENTIME_DATA_DIR.
 
-Die CSV wird bei jedem Lauf komplett neu geschrieben, eine Zeile je App und
-Tag. Exporter und Tagesstatistik arbeiten unverändert darauf.
+Beide CSVs werden bei jedem Lauf komplett neu geschrieben: screentime.csv mit
+einer Zeile je App und Tag, categories.csv mit Apples Kategorien je Tag.
 """
 
 import csv
@@ -23,6 +25,9 @@ SCRIPT_DIR = Path(__file__).parent.parent
 DATA_DIR = Path(os.getenv("SCREENTIME_DATA_DIR") or (SCRIPT_DIR / "data"))
 DAYS_DIR = DATA_DIR / "days"
 CSV_FILE = DATA_DIR / "screentime.csv"
+# Apples Kategorien je Tag (Kennung, Name, Sekunden) -- seit iOS 27 korrekt und
+# vom Nutzer erweiterbar, deshalb statt unserer eigenen Zuordnung.
+CATEGORIES_FILE = DATA_DIR / "categories.csv"
 SOURCE_NAME = os.getenv("SCREENTIME_CHILD") or "Kind"
 
 # So weit reicht die Tagesstatistik (statistics_backfill.DAYS_BACK) zurück.
@@ -109,20 +114,32 @@ def rows_for(snap: dict) -> list[dict]:
     return rows
 
 
-def main() -> int:
-    days = load_days()
-    rows = [r for snap in days for r in rows_for(snap)]
+def category_rows_for(snap: dict) -> list[dict]:
+    return [{"date": snap["_day"].isoformat(), "id": c.get("id") or "", "name": c["name"],
+             "seconds": c["seconds"]}
+            for c in snap.get("categories") or [] if c.get("name") and c.get("seconds")]
 
-    tmp = CSV_FILE.with_suffix(".csv.tmp")
+
+def write_csv(path: Path, fields: list[str], rows: list[dict]) -> None:
+    tmp = path.with_suffix(".csv.tmp")
     with tmp.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["timestamp", "app", "title", "duration", "source"])
+        writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
-    tmp.replace(CSV_FILE)
+    tmp.replace(path)
+
+
+def main() -> int:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    days = load_days()
+    rows = [r for snap in days for r in rows_for(snap)]
+    write_csv(CSV_FILE, ["timestamp", "app", "title", "duration", "source"], rows)
+    write_csv(CATEGORIES_FILE, ["date", "id", "name", "seconds"],
+              [r for snap in days for r in category_rows_for(snap)])
 
     if days:
         newest = max(days, key=lambda s: s["_day"])
-        print(f"[UI] {len(days)} Tage, {len(rows)} Zeilen -> {CSV_FILE.name} "
+        print(f"[UI] {SOURCE_NAME}: {len(days)} Tage, {len(rows)} Zeilen -> {CSV_FILE.name} "
               f"(jüngster Tag {newest['_day']}, {newest.get('apple_updated') or 'ohne Stand'})")
     else:
         print("[UI] Noch keine Tageswerte vorhanden")

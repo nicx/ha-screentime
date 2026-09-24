@@ -23,6 +23,7 @@ final class AppEnvironment: ObservableObject {
     }
 
     func bootstrap() {
+        settings.migrateLegacySettings()
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         log.appendSystem("Gestartet – Datenverzeichnis: \(BundledRuntime.dataDirectory.path)")
 

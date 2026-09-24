@@ -42,7 +42,8 @@ enum RunState: Equatable {
 final class ExportRunner: ObservableObject {
 
     @Published private(set) var state: RunState = .idle
-    @Published private(set) var status: RunStatus?
+    /// Letzter Stand je Kind (Schluessel: Name wie in den Einstellungen).
+    @Published private(set) var statuses: [String: RunStatus] = [:]
     @Published private(set) var lastRun: Date?
     @Published private(set) var lastSuccess: Date?
 
@@ -55,14 +56,19 @@ final class ExportRunner: ObservableObject {
     private var isRunning = false
 
     /// Verhindert, dass Schwellwert-/Tagesmail mehrfach am selben Tag rausgeht.
-    private var thresholdNotifiedOn: String?
+    private var thresholdNotifiedOn: [String: String] = [:]
     private var summarySentOn: String?
 
     init(settings: AppSettings, log: LogStore, notifier: Notifier) {
         self.settings = settings
         self.log = log
         self.notifier = notifier
-        self.status = Self.readStatus()
+        reloadStatuses()
+    }
+
+    /// Stände in der Reihenfolge der Einstellungen (für Menü und Mails).
+    var orderedStatuses: [(child: String, status: RunStatus)] {
+        settings.children.compactMap { child in statuses[child].map { (child, $0) } }
     }
 
     // MARK: - Zeitplan
@@ -142,16 +148,22 @@ final class ExportRunner: ObservableObject {
         isRunning = true
         state = .running
         log.appendSystem("Lauf gestartet (\(trigger))")
-
-        try? FileManager.default.createDirectory(at: Self.daysDirectory,
-                                                 withIntermediateDirectories: true)
+        let children = settings.children
 
         // Erst auslesen, dann exportieren. Scheitert das Auslesen, laeuft der
         // Export trotzdem mit den vorhandenen Tageswerten -- sonst verschwaenden
         // die per REST gesetzten Sensoren nach dem naechsten HA-Neustart.
-        let readProblem = await readScreenTime()
+        let readProblem = await readScreenTime(children)
 
-        let result = await execute()
+        var failures: [String] = []
+        for child in children {
+            let result = await execute(child: child)
+            if result.exitCode != 0 {
+                failures.append(result.tail.isEmpty
+                    ? "\(child): run.py endete mit Code \(result.exitCode)."
+                    : "\(child): run.py endete mit Code \(result.exitCode):\n\n\(result.tail)")
+            }
+        }
         lastRun = Date()
         isRunning = false
 
@@ -159,19 +171,16 @@ final class ExportRunner: ObservableObject {
         // danach und nicht davor: erst die Arbeit erledigen, dann neu starten.
         if Updater.applyIfAvailable(log: log) { return }
 
-        if result.exitCode == 0 {
+        reloadStatuses()
+        if failures.isEmpty {
             state = readProblem.map { .failed($0) } ?? .ok
             lastSuccess = Date()
-            status = Self.readStatus()
             notifier.report(ScreenTimeConditions.run, healthy: true)
-            checkThreshold()
+            checkThresholds()
             checkDailySummary()
         } else {
-            let detail = result.tail.isEmpty
-                ? "run.py endete mit Code \(result.exitCode)."
-                : "run.py endete mit Code \(result.exitCode):\n\n\(result.tail)"
-            state = .failed("Lauf fehlgeschlagen (Code \(result.exitCode))")
-            notifier.report(ScreenTimeConditions.run, healthy: false, detail: detail)
+            state = .failed("Lauf fehlgeschlagen")
+            notifier.report(ScreenTimeConditions.run, healthy: false, detail: failures.joined(separator: "\n\n"))
         }
     }
 
@@ -181,10 +190,11 @@ final class ExportRunner: ObservableObject {
     /// Lauf, Ausfall). Reicht Apples Verlauf weniger weit, bricht der Leser
     /// dort ab und behaelt, was er hat.
     private static let backfillDays = 14
-
-    static var daysDirectory: URL { BundledRuntime.dataDirectory.appendingPathComponent("days", isDirectory: true) }
-    private static var diagnosticsURL: URL { BundledRuntime.dataDirectory.appendingPathComponent("diagnostics.json") }
     private static let lastReadSuccessKey = "lastUIReadSuccess"
+
+    private static func daysDirectory(_ child: String) -> URL {
+        BundledRuntime.childDirectory(child).appendingPathComponent("days", isDirectory: true)
+    }
 
     private static func dayKey(offset: Int) -> String {
         let day = Calendar.current.date(byAdding: .day, value: -offset, to: Date())!
@@ -193,33 +203,39 @@ final class ExportRunner: ObservableObject {
         return f.string(from: day)
     }
 
-    private static func dayFile(_ key: String) -> URL { daysDirectory.appendingPathComponent("\(key).json") }
+    private static func dayFile(_ child: String, _ key: String) -> URL {
+        daysDirectory(child).appendingPathComponent("\(key).json")
+    }
 
     /// Heute immer; den Vortag bis 6 Uhr erneut (Apple meldet die Abendnutzung
     /// oft verspaetet); dazu jeden fehlenden Tag der letzten zwei Wochen.
-    private func dayOffsetsToRead() -> [Int] {
+    private func dayOffsetsToRead(_ child: String) -> [Int] {
         var offsets: Set<Int> = [0]
         if Calendar.current.component(.hour, from: Date()) < 6 { offsets.insert(1) }
         for off in 1...Self.backfillDays
-        where !FileManager.default.fileExists(atPath: Self.dayFile(Self.dayKey(offset: off)).path) {
+        where !FileManager.default.fileExists(atPath: Self.dayFile(child, Self.dayKey(offset: off)).path) {
             offsets.insert(off)
         }
         return offsets.sorted()
     }
 
-    /// Liest die Bildschirmzeit aus den Systemeinstellungen und legt je Tag eine
-    /// Datei ab. Rueckgabe: Fehlermeldung fuer die Statusanzeige, sonst nil.
-    private func readScreenTime() async -> String? {
-        let child = settings.trimmedChildName
-        let offsets = dayOffsetsToRead()
+    /// Liest die Bildschirmzeit aller Kinder aus den Systemeinstellungen und
+    /// legt je Kind und Tag eine Datei ab. Rueckgabe: Fehlermeldung fuer die
+    /// Statusanzeige, sonst nil.
+    private func readScreenTime(_ children: [String]) async -> String? {
+        let plan = children.map { (child: $0, dayOffsets: dayOffsetsToRead($0)) }
+        for child in children {
+            try? FileManager.default.createDirectory(at: Self.daysDirectory(child), withIntermediateDirectories: true)
+        }
         let logSink: (String) -> Void = { [weak self] line in
             Task { @MainActor in self?.log.appendSystem(line) }
         }
         let started = Date()
-        log.appendSystem("Lese Bildschirmzeit: \(offsets.count == 1 ? "heute" : "\(offsets.count) Tage")")
+        let dayCount = plan.map(\.dayOffsets.count).reduce(0, +)
+        log.appendSystem("Lese Bildschirmzeit: \(children.joined(separator: ", ")) (\(dayCount) Tage)")
 
-        let outcome: Result<[DaySnapshot], Error> = await Task.detached(priority: .utility) {
-            Result { try ScreenTimeReader(child: child, log: logSink).read(dayOffsets: offsets) }
+        let outcome: Result<[String: Result<[DaySnapshot], Error>], Error> = await Task.detached(priority: .utility) {
+            Result { try ScreenTimeReader(log: logSink).read(plan) }
         }.value
 
         var diag: [String: Any] = [
@@ -228,54 +244,73 @@ final class ExportRunner: ObservableObject {
             "dauer_s": (Date().timeIntervalSince(started) * 10).rounded() / 10,
             "hard_error": false,
         ]
+        let enc = JSONEncoder()
+        enc.keyEncodingStrategy = .convertToSnakeCase
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
 
-        let problem: String?
+        var problems: [String] = []
         switch outcome {
-        case .success(let snapshots):
-            let enc = JSONEncoder()
-            enc.keyEncodingStrategy = .convertToSnakeCase
-            enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-            for snap in snapshots {
-                if let data = try? enc.encode(snap) {
-                    try? data.write(to: Self.dayFile(snap.date), options: .atomic)
+        case .success(let perChild):
+            var kinder: [String: Any] = [:]
+            for child in children {
+                var info: [String: Any] = [:]
+                switch perChild[child] {
+                case .success(let snapshots)?:
+                    for snap in snapshots {
+                        if let data = try? enc.encode(snap) {
+                            try? data.write(to: Self.dayFile(child, snap.date), options: .atomic)
+                        }
+                    }
+                    info["tage_gelesen"] = snapshots.map(\.date)
+                    info["apple_aktualisiert"] = snapshots.first?.appleUpdated
+                    info["geraet"] = snapshots.first?.device
+                case .failure(let error)?:
+                    info["fehler"] = error.localizedDescription
+                    problems.append("\(child): \(error.localizedDescription)")
+                    log.appendSystem("Auslesen \(child): \(error.localizedDescription)")
+                case nil:
+                    info["fehler"] = "nicht gelesen"
+                    problems.append("\(child): nicht gelesen")
                 }
+                kinder[child] = info
             }
-            UserDefaults.standard.set(Date(), forKey: Self.lastReadSuccessKey)
-            diag["tage_gelesen"] = snapshots.map(\.date)
-            diag["apple_aktualisiert"] = snapshots.first?.appleUpdated
-            diag["geraet"] = snapshots.first?.device
-            notifier.report(ScreenTimeConditions.read, healthy: true)
-            problem = nil
+            diag["kinder"] = kinder
+            if problems.isEmpty {
+                UserDefaults.standard.set(Date(), forKey: Self.lastReadSuccessKey)
+                notifier.report(ScreenTimeConditions.read, healthy: true)
+            } else {
+                diag["hard_error"] = true
+                notifier.report(ScreenTimeConditions.read, healthy: false, detail: problems.joined(separator: "\n"))
+            }
         case .failure(let error):
             let message = error.localizedDescription
             log.appendSystem("Auslesen: \(message)")
             diag["fehler"] = message
             if case ScreenTimeReaderError.settingsInUse = error {
                 // Kein Fehler: jemand benutzt gerade die Systemeinstellungen.
-                problem = nil
             } else {
                 diag["hard_error"] = true
                 notifier.report(ScreenTimeConditions.read, healthy: false, detail: message)
-                problem = message
+                problems.append(message)
             }
         }
         if let last = UserDefaults.standard.object(forKey: Self.lastReadSuccessKey) as? Date {
             diag["letzter_erfolg"] = ISO8601DateFormatter().string(from: last)
         }
         if let data = try? JSONSerialization.data(withJSONObject: diag, options: [.prettyPrinted, .sortedKeys]) {
-            try? data.write(to: Self.diagnosticsURL, options: .atomic)
+            try? data.write(to: BundledRuntime.diagnosticsURL, options: .atomic)
         }
-        return problem
+        return problems.isEmpty ? nil : problems.joined(separator: "; ")
     }
 
     // MARK: - Python-Lauf
 
-    private func execute() async -> (exitCode: Int32, tail: String) {
+    private func execute(child: String) async -> (exitCode: Int32, tail: String) {
         let proc = Process()
         proc.executableURL = BundledRuntime.pythonURL
         proc.arguments = [BundledRuntime.runScriptURL.path]
         proc.currentDirectoryURL = BundledRuntime.payloadRoot
-        proc.environment = settings.processEnvironment()
+        proc.environment = settings.processEnvironment(child: child)
 
         let pipe = Pipe()
         proc.standardOutput = pipe
@@ -317,37 +352,41 @@ final class ExportRunner: ObservableObject {
 
     // MARK: - Auswertung
 
-    private static func readStatus() -> RunStatus? {
-        guard let data = try? Data(contentsOf: BundledRuntime.statusFileURL) else { return nil }
-        return try? JSONDecoder().decode(RunStatus.self, from: data)
+    private func reloadStatuses() {
+        var out: [String: RunStatus] = [:]
+        for child in settings.children {
+            if let data = try? Data(contentsOf: BundledRuntime.statusFileURL(child)),
+               let st = try? JSONDecoder().decode(RunStatus.self, from: data) {
+                out[child] = st
+            }
+        }
+        statuses = out
     }
 
-    private func checkThreshold() {
-        guard settings.notifyOnThreshold, let status else { return }
+    private func checkThresholds() {
+        guard settings.notifyOnThreshold else { return }
         let today = Self.todayKey()
-        guard status.date == today else { return }
-        guard status.totalMinutes >= Double(settings.thresholdMinutes) else {
-            // Neuer Tag bzw. wieder unter der Grenze: erneut scharf schalten.
-            if thresholdNotifiedOn != today { thresholdNotifiedOn = nil }
-            return
+        for (child, status) in orderedStatuses where status.date == today {
+            guard status.totalMinutes >= Double(settings.thresholdMinutes) else { continue }
+            guard thresholdNotifiedOn[child] != today else { continue }
+            thresholdNotifiedOn[child] = today
+            notifier.oneShot(
+                subject: "Screen Time \(child): Limit überschritten (\(Int(status.totalMinutes)) min)",
+                body: """
+                Heutige Bildschirmzeit von \(child): \(format(status.totalMinutes))
+                Grenze: \(format(Double(settings.thresholdMinutes)))
+
+                \(summaryBody(status))
+                """)
         }
-        guard thresholdNotifiedOn != today else { return }
-        thresholdNotifiedOn = today
-
-        notifier.oneShot(
-            subject: "Screen Time: Limit überschritten (\(Int(status.totalMinutes)) min)",
-            body: """
-            Heutige Bildschirmzeit: \(format(status.totalMinutes))
-            Grenze: \(format(Double(settings.thresholdMinutes)))
-
-            \(summaryBody(status))
-            """)
     }
 
     private func checkDailySummary() {
-        guard settings.dailySummary, let status else { return }
+        guard settings.dailySummary else { return }
         let today = Self.todayKey()
         guard summarySentOn != today else { return }
+        let current = orderedStatuses.filter { $0.status.date == today }
+        guard !current.isEmpty else { return }
 
         // Erst ab der eingestellten Uhrzeit senden.
         let parts = settings.dailySummaryTime.split(separator: ":")
@@ -358,19 +397,13 @@ final class ExportRunner: ObservableObject {
               (h > hour || (h == hour && m >= minute)) else { return }
 
         summarySentOn = today
-        notifier.oneShot(
-            subject: "Screen Time: Tagesbericht (\(format(status.totalMinutes)))",
-            body: summaryBody(status))
+        let headline = current.map { "\($0.child) \(format($0.status.totalMinutes))" }.joined(separator: ", ")
+        let body = current.map { "=== \($0.child) ===\n\(summaryBody($0.status))" }.joined(separator: "\n")
+        notifier.oneShot(subject: "Screen Time: Tagesbericht (\(headline))", body: body)
     }
 
     private func summaryBody(_ status: RunStatus) -> String {
         var out = "Bildschirmzeit gesamt: \(format(status.totalMinutes))\n"
-        if !status.byDevice.isEmpty {
-            out += "\nGeräte:\n"
-            for (name, minutes) in status.byDevice.sorted(by: { $0.value > $1.value }) {
-                out += "  \(name): \(format(minutes))\n"
-            }
-        }
         if !status.byApp.isEmpty {
             out += "\nTop-Apps:\n"
             for (name, minutes) in status.byApp.sorted(by: { $0.value > $1.value }).prefix(10) {

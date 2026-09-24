@@ -8,6 +8,7 @@ import csv
 import json
 import os
 import sys
+import unicodedata
 import requests
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -47,7 +48,22 @@ STATUS_FILE = DATA_DIR / "status.json"
 # HA gespiegelt: der Sammel-Benutzer hat ein privates Home, in das von aussen
 # niemand hineinschaut -- ohne diese Bruecke bleibt bei einer stummen Stoerung
 # unklar, WARUM keine Daten ankommen.
-DIAG_FILE = DATA_DIR / "diagnostics.json"
+DIAG_FILE = Path(os.getenv("SCREENTIME_DIAG_FILE") or (DATA_DIR / "diagnostics.json"))
+CATEGORIES_FILE = DATA_DIR / "categories.csv"
+
+# Je Kind ein eigenes Kuerzel in allen Entity-IDs (sensor.screentime_<kind>_total)
+# und ein Name fuer die Anzeige ("Bildschirmzeit Kind gesamt").
+PREFIX = os.getenv("SCREENTIME_ENTITY_PREFIX", "")
+CHILD = os.getenv("SCREENTIME_CHILD", "").strip()
+
+
+def eid(suffix: str) -> str:
+    return f"sensor.screentime_{PREFIX}{suffix}"
+
+
+def label(text: str) -> str:
+    """'gesamt' -> 'Bildschirmzeit Kind gesamt' (ohne Kind: 'Bildschirmzeit gesamt')."""
+    return f"Bildschirmzeit {CHILD} {text}" if CHILD else f"Bildschirmzeit {text}"
 
 # Quelle "ui": die App liest die Bildschirmzeit aus den Systemeinstellungen,
 # summiert ueber alle Geraete des Kindes. Eine Aufteilung nach Geraet gibt es
@@ -75,12 +91,13 @@ def export_ui_diagnostics(diag: dict) -> None:
         "geprueft_am": diag.get("written_at"),
         "letzter_erfolg": last,
         "alter_letzter_erfolg (h)": age_h,
-        "apple_aktualisiert": diag.get("apple_aktualisiert"),
-        "geraet": diag.get("geraet"),
-        "tage_gelesen": ", ".join(diag.get("tage_gelesen") or []) or None,
         "dauer (s)": diag.get("dauer_s"),
         "fehler": diag.get("fehler"),
     }
+    for name, info in (diag.get("kinder") or {}).items():
+        attrs[f"{name} — Stand bei Apple"] = info.get("apple_aktualisiert")
+        attrs[f"{name} — Tage gelesen"] = len(info.get("tage_gelesen") or [])
+        attrs[f"{name} — Fehler"] = info.get("fehler")
     if diag.get("hard_error"):
         state = "Fehler"
     elif age_h is None or age_h > UI_STALE_HOURS:
@@ -165,8 +182,18 @@ CATEGORY_ICONS = {
 
 
 def slugify(name: str) -> str:
-    """App-/Kategoriename -> Entity-ID-tauglicher Bestandteil."""
-    out = "".join(c.lower() if c.isalnum() else "_" for c in name)
+    """
+    App-/Kategoriename -> Entity-ID-tauglicher Bestandteil.
+
+    HA erlaubt nur a-z, 0-9 und "_": Umlaute werden ausgeschrieben
+    ("Produktivität" -> "produktivitaet"), andere Akzente entfernt. Dieselbe
+    Regel steht in BundledRuntime.slug der App.
+    """
+    s = name.lower()
+    for a, b in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
+        s = s.replace(a, b)
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    out = "".join(c if c.isascii() and c.isalnum() else "_" for c in s)
     while "__" in out:
         out = out.replace("__", "_")
     return out.strip("_") or "unknown"
@@ -316,6 +343,27 @@ def export_to_influxdb(rows: list[dict]) -> bool:
         return False
 
 
+def load_apple_categories() -> dict:
+    """{datum: {kategoriename: sekunden}} aus categories.csv (Quelle "ui")."""
+    out: dict = defaultdict(dict)
+    if not CATEGORIES_FILE.exists():
+        return out
+    with CATEGORIES_FILE.open(newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            try:
+                day = datetime.fromisoformat(row["date"]).date()
+                out[day][row["name"]] = out[day].get(row["name"], 0.0) + float(row["seconds"] or 0)
+            except (KeyError, ValueError):
+                continue
+    return out
+
+
+def known_apple_categories() -> list[str]:
+    """Alle Kategorien der vorhandenen Tage -- auch an Tagen ohne Nutzung wird
+    jede gemeldet, sonst verschwaende die Entity und risse Luecken."""
+    return sorted({name for day in load_apple_categories().values() for name in day})
+
+
 def calculate_daily_aggregates(rows: list[dict], target_date=None) -> dict:
     """
     Calculates daily aggregates for Home Assistant sensors.
@@ -356,6 +404,11 @@ def calculate_daily_aggregates(rows: list[dict], target_date=None) -> dict:
         if r["title"] != UNATTRIBUTED_TITLE:
             by_category_s[r.get("category") or "Unknown"] += r["duration"]
     by_category = {k: round(v / 60, 1) for k, v in by_category_s.items()}
+    if UI_MODE:
+        # Apples eigene Kategorien statt unserer Zuordnung (seit iOS 27 korrekt,
+        # eigene Kategorien moeglich). Den Rundungsrest hat Apple dort schon verteilt.
+        by_category = {k: round(v / 60, 1)
+                       for k, v in load_apple_categories().get(target_date, {}).items()}
 
     app_totals = sorted(sum_by("title").items(), key=lambda kv: kv[1], reverse=True)
     # "Nicht zugeordnet" ist Rundungsrest, keine App: zaehlt zur Gesamtzeit,
@@ -464,13 +517,13 @@ def export_to_homeassistant(rows: list[dict]) -> bool:
 
     # Base sensors
     sensors = [
-        ("sensor.screentime_total", aggregates["total_minutes"], "min", {
-            "friendly_name": "Bildschirmzeit gesamt",
+        (eid("total"), aggregates["total_minutes"], "min", {
+            "friendly_name": label("gesamt"),
             "icon": "mdi:cellphone-screen",
             "session_count": aggregates["session_count"],
         }),
-        ("sensor.screentime_top_app", aggregates["top_app"], None, {
-            "friendly_name": "Bildschirmzeit Top-App",
+        (eid("top_app"), aggregates["top_app"], None, {
+            "friendly_name": label("Top-App"),
             "icon": "mdi:trophy",
             "minutes": aggregates["top_app_minutes"],
         }),
@@ -511,11 +564,12 @@ def export_to_homeassistant(rows: list[dict]) -> bool:
         ok = update_ha_sensor(entity_id, state, attrs, unit) and ok
 
     # Category sensor with all values as attributes
+    # Zustand: Minuten der groessten Kategorie; alle Werte stehen in den Attributen.
     ok = update_ha_sensor(
-        "sensor.screentime_by_category",
-        aggregates["by_category"].get("Social", 0),
+        eid("by_category"),
+        max(aggregates["by_category"].values(), default=0),
         {
-            "friendly_name": "Bildschirmzeit Kategorien (Übersicht)",
+            "friendly_name": label("Kategorien (Übersicht)"),
             "icon": "mdi:chart-pie",
             **{f"category_{k}": v for k, v in aggregates["by_category"].items()}
         },
@@ -524,10 +578,10 @@ def export_to_homeassistant(rows: list[dict]) -> bool:
 
     # Top apps as attributes
     ok = update_ha_sensor(
-        "sensor.screentime_top_apps",
+        eid("top_apps"),
         len(aggregates["by_app"]),
         {
-            "friendly_name": "Bildschirmzeit Top-Apps (Übersicht)",
+            "friendly_name": label("Top-Apps (Übersicht)"),
             "icon": "mdi:format-list-numbered",
             **aggregates["by_app"]
         },
@@ -538,17 +592,26 @@ def export_to_homeassistant(rows: list[dict]) -> bool:
     # Bewusst IMMER alle bekannten Kategorien senden, auch mit 0 Minuten: sonst
     # verschwindet die Entity an ruhigen Tagen und reißt Lücken in Verlauf und
     # Langzeitstatistik.
-    for category in known_categories():
-        minutes = aggregates["by_category"].get(category, 0.0)
-        ok = update_ha_sensor(
-            f"sensor.screentime_cat_{slugify(category)}",
-            minutes,
-            {
-                "friendly_name": f"Bildschirmzeit {CATEGORY_LABELS.get(category, category)}",
-                "icon": CATEGORY_ICONS.get(category, "mdi:shape"),
-            },
-            "min"
-        ) and ok
+    if UI_MODE:
+        for category in known_apple_categories():
+            ok = update_ha_sensor(
+                eid(f"cat_{slugify(category)}"),
+                aggregates["by_category"].get(category, 0.0),
+                {"friendly_name": label(category), "icon": "mdi:shape"},
+                "min"
+            ) and ok
+    else:
+        for category in known_categories():
+            minutes = aggregates["by_category"].get(category, 0.0)
+            ok = update_ha_sensor(
+                eid(f"cat_{slugify(category)}"),
+                minutes,
+                {
+                    "friendly_name": label(CATEGORY_LABELS.get(category, category)),
+                    "icon": CATEGORY_ICONS.get(category, "mdi:shape"),
+                },
+                "min"
+            ) and ok
 
     # --- Einzelsensoren für beobachtete Apps ---
     # Nur eine feste Auswahl statt "jede gesehene App": sonst sammeln sich über
@@ -558,10 +621,10 @@ def export_to_homeassistant(rows: list[dict]) -> bool:
     for app in watched_apps():
         minutes = by_app_all.get(app, 0.0)
         ok = update_ha_sensor(
-            f"sensor.screentime_app_{slugify(app)}",
+            eid(f"app_{slugify(app)}"),
             minutes,
             {
-                "friendly_name": f"Bildschirmzeit {app}",
+                "friendly_name": label(app),
                 "icon": "mdi:application",
             },
             "min"

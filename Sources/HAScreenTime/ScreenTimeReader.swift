@@ -2,13 +2,16 @@ import AppKit
 import ApplicationServices
 
 /// Tagesstand eines Kindes, wie ihn die Bildschirmzeit-Ansicht zeigt.
-/// Wird als JSON (snake_case) nach `data/days/<datum>.json` geschrieben und
-/// vom Python-Teil (`ui_import.py`) weiterverarbeitet.
+/// Wird als JSON (snake_case) nach `data/children/<kind>/days/<datum>.json`
+/// geschrieben und vom Python-Teil (`ui_import.py`) weiterverarbeitet.
 struct DaySnapshot: Codable {
     struct App: Codable { var bundleId: String; var name: String; var seconds: Int? }
     struct Web: Codable { var domain: String; var seconds: Int? }
-    struct Category: Codable { var name: String; var seconds: Int? }
+    /// Apples Kategorie mit fester Kennung (z. B. `DH1003` = Unterhaltung);
+    /// seit iOS 27 lassen sich auch eigene anlegen.
+    struct Category: Codable { var id: String; var name: String; var seconds: Int? }
 
+    var child: String
     var date: String            // yyyy-MM-dd
     var label: String?          // z. B. "Heute, 24. September"
     var appleUpdated: String?   // z. B. "Heute um 15:45 aktualisiert"
@@ -47,7 +50,7 @@ enum ScreenTimeReaderError: LocalizedError {
     }
 }
 
-/// Liest die Bildschirmzeit eines Kindes aus der Familien-Ansicht der
+/// Liest die Bildschirmzeit von Kindern aus der Familien-Ansicht der
 /// Systemeinstellungen (macOS 27) über die Bedienungshilfen.
 ///
 /// Warum so: Seit iOS 27 bieten die Geräte eines Kinder-Accounts ihre
@@ -59,16 +62,17 @@ enum ScreenTimeReaderError: LocalizedError {
 /// Arbeitet synchron mit kurzen Wartezeiten; nur außerhalb des Main-Threads aufrufen.
 final class ScreenTimeReader {
 
-    private let child: String
+    /// Einträge im Menü „Darstellungsoptionen“ über der Liste.
+    private static let appsMode = "Apps & Websites"
+    private static let categoriesMode = "App-Kategorien"
+    private static let bundleID = "com.apple.systempreferences"
+
     private let log: (String) -> Void
     private var appEl: AXUIElement?
     private var settingsApp: NSRunningApplication?
     private var launchedByUs = false
 
-    private static let bundleID = "com.apple.systempreferences"
-
-    init(child: String, log: @escaping (String) -> Void) {
-        self.child = child
+    init(log: @escaping (String) -> Void) {
         self.log = log
     }
 
@@ -80,8 +84,12 @@ final class ScreenTimeReader {
         _ = AXIsProcessTrustedWithOptions(opt)
     }
 
-    /// Liest die angegebenen Tage; 0 = heute, 1 = gestern, …
-    func read(dayOffsets: [Int]) throws -> [DaySnapshot] {
+    /// Liest je Kind die angegebenen Tage (0 = heute, 1 = gestern, …).
+    ///
+    /// Scheitert ein Kind, bekommt nur dieses einen Fehler, die anderen werden
+    /// trotzdem gelesen. Nur Probleme, die alle betreffen (Berechtigung,
+    /// Systemeinstellungen in Benutzung), werfen.
+    func read(_ plan: [(child: String, dayOffsets: [Int])]) throws -> [String: Result<[DaySnapshot], Error>] {
         guard Self.isTrusted else { throw ScreenTimeReaderError.notTrusted }
         // Sind die Systemeinstellungen schon offen, benutzt sie vermutlich
         // gerade jemand -- dann nicht fernsteuern, lieber einen Lauf auslassen.
@@ -91,7 +99,18 @@ final class ScreenTimeReader {
         try launchSettings()
         defer { cleanup() }
 
-        try openDetail()
+        var results: [String: Result<[DaySnapshot], Error>] = [:]
+        for (child, offsets) in plan {
+            results[child] = Result { try readChild(child, dayOffsets: offsets) }
+            closeSheets()
+        }
+        return results
+    }
+
+    // MARK: - Ein Kind
+
+    private func readChild(_ child: String, dayOffsets: [Int]) throws -> [DaySnapshot] {
+        try openDetail(child)
         try ensureDayMode()
         if let today = first(id: "today-button") { press(today, "Heute") }
         pause(0.5)
@@ -104,14 +123,16 @@ final class ScreenTimeReader {
                     try stepBack()
                     current += 1
                 }
-                snapshots.append(try readCurrentDay(offset: offset))
+                snapshots.append(try readCurrentDay(child: child, offset: offset))
             } catch where offset > 0 {
                 // Vergangene Tage sind Zugabe: reicht Apples Verlauf nicht so weit
                 // zurück oder hakt ein älterer Tag, bleiben die gelesenen erhalten.
-                log("Vergangene Tage ab \(offset) Tag(en) zurück übersprungen: \(error.localizedDescription)")
+                log("\(child): vergangene Tage ab \(offset) Tag(en) zurück übersprungen: \(error.localizedDescription)")
                 break
             }
         }
+        // Die Ansicht so hinterlassen, wie man sie von Hand vorfindet.
+        try? setListMode(Self.appsMode)
         return snapshots
     }
 
@@ -142,14 +163,18 @@ final class ScreenTimeReader {
         }
     }
 
-    /// Dialoge schließen und die selbst gestarteten Systemeinstellungen beenden.
-    private func cleanup() {
-        for _ in 0..<3 {
+    /// Alle Dialoge schließen, bis die Familienliste wieder frei ist.
+    private func closeSheets() {
+        for _ in 0..<4 {
             // Der innerste Dialog steht in Dokumentreihenfolge zuletzt.
             guard let done = all().last(where: { role($0) == "AXButton" && desc($0) == "Fertig" }) else { break }
             press(done, "Fertig")
             pause(0.6)
         }
+    }
+
+    private func cleanup() {
+        closeSheets()
         if launchedByUs { settingsApp?.terminate() }
         appEl = nil
         settingsApp = nil
@@ -158,8 +183,7 @@ final class ScreenTimeReader {
 
     // MARK: - Navigation
 
-    private func openDetail() throws {
-        if first(id: "day-picker-segment") != nil { return }
+    private func openDetail(_ child: String) throws {
         let prefix = child + ","
         let memberRow = {
             self.all().first { (self.ident($0) ?? "").hasPrefix("FAMILY_MEMBER_ROW_")
@@ -171,7 +195,7 @@ final class ScreenTimeReader {
             }
             selectSidebar(family)
         }
-        guard let row = waitFor("Familienmitglied", memberRow) else {
+        guard let row = waitFor("Familienmitglied \(child)", memberRow) else {
             throw ScreenTimeReaderError.notFound("Familienmitglied „\(child)“")
         }
         press(row, "Familienmitglied")
@@ -181,7 +205,7 @@ final class ScreenTimeReader {
         guard waitFor("Bildschirmzeit-Übersicht", {
             self.first(id: "most-used-header-link") ?? self.first(id: "weekly-usage-summary-chart")
         }) != nil else {
-            throw ScreenTimeReaderError.notFound("Bildschirmzeit-Übersicht")
+            throw ScreenTimeReaderError.notFound("Bildschirmzeit-Übersicht von „\(child)“")
         }
         if let link = first(id: "most-used-header-link") {
             press(link, "Heute am häufigsten verwendet")
@@ -189,7 +213,7 @@ final class ScreenTimeReader {
             press(chart, "Wochendiagramm")
         }
         guard waitFor("Detailansicht", { self.first(id: "day-picker-segment") }) != nil else {
-            throw ScreenTimeReaderError.notFound("Detailansicht")
+            throw ScreenTimeReaderError.notFound("Detailansicht von „\(child)“")
         }
     }
 
@@ -223,6 +247,42 @@ final class ScreenTimeReader {
         throw ScreenTimeReaderError.wrongView("Tagesansicht lässt sich nicht einstellen")
     }
 
+    /// Liste unter „Am häufigsten verwendet“ auf Apps oder Kategorien stellen.
+    private func setListMode(_ title: String) throws {
+        guard let picker = first(id: "most-used-item-type-picker") else {
+            throw ScreenTimeReaderError.notFound("Menü „Darstellungsoptionen“")
+        }
+        if value(picker) == title { return }
+        press(picker, "Darstellungsoptionen")
+        guard let item = waitFor("Menüpunkt „\(title)“", timeout: 3, {
+            self.menuItems(near: picker).first { self.text($0, kAXTitleAttribute) == title }
+        }) else {
+            // Offenes Menü nicht stehen lassen.
+            for menu in menus(near: picker) { AXUIElementPerformAction(menu, kAXCancelAction as CFString) }
+            throw ScreenTimeReaderError.notFound("Menüpunkt „\(title)“")
+        }
+        press(item, title)
+        guard waitFor("Darstellung „\(title)“", timeout: 4, {
+            self.first(id: "most-used-item-type-picker").flatMap { self.value($0) == title ? $0 : nil }
+        }) != nil else {
+            throw ScreenTimeReaderError.wrongView("Darstellung „\(title)“ lässt sich nicht einstellen")
+        }
+        pause(0.4)
+    }
+
+    /// Das Menü eines Aufklappmenüs hängt je nach Version am Menü selbst oder
+    /// am Programm-Element.
+    private func menus(near picker: AXUIElement) -> [AXUIElement] {
+        let local = flatten([picker]).filter { role($0) == "AXMenu" }
+        if !local.isEmpty { return local }
+        guard let appEl else { return [] }
+        return ((attr(appEl, kAXChildrenAttribute) as? [AXUIElement]) ?? []).filter { role($0) == "AXMenu" }
+    }
+
+    private func menuItems(near picker: AXUIElement) -> [AXUIElement] {
+        flatten(menus(near: picker)).filter { role($0) == "AXMenuItem" }
+    }
+
     /// Einen Tag zurück; wartet, bis sich die Datumsbeschriftung ändert.
     private func stepBack() throws {
         let before = dateLabel()
@@ -239,13 +299,8 @@ final class ScreenTimeReader {
         pause(0.4)
     }
 
-    // MARK: - Auslesen
-
-    private func readCurrentDay(offset: Int) throws -> DaySnapshot {
-        let day = Calendar.current.date(byAdding: .day, value: -offset, to: Date())!
-        let dayOfMonth = Calendar.current.component(.day, from: day)
-
-        // Liste vollständig aufklappen: sie wächst schrittweise (5 → 15 → …).
+    /// „Mehr anzeigen“ drücken, bis die Liste vollständig ist (5 → 15 → …).
+    private func expandList() {
         var rounds = 0
         while rounds < 40, let more = first(id: "show-more-for-screen-usage") {
             let before = barCount()
@@ -255,7 +310,17 @@ final class ScreenTimeReader {
             while Date() < deadline, barCount() == before { pause(0.25) }
             if barCount() == before { break }
         }
+    }
 
+    // MARK: - Auslesen
+
+    private func readCurrentDay(child: String, offset: Int) throws -> DaySnapshot {
+        let day = Calendar.current.date(byAdding: .day, value: -offset, to: Date())!
+        let dayOfMonth = Calendar.current.component(.day, from: day)
+
+        // Erst die Apps …
+        try setListMode(Self.appsMode)
+        expandList()
         let els = all()
         let label = dateLabel(in: els)
         // Das Datum steht als "…, 24. September" in der Beschriftung; die
@@ -268,16 +333,10 @@ final class ScreenTimeReader {
             throw ScreenTimeReaderError.wrongView("nicht in der Tagesansicht (\(label))")
         }
 
-        func values(_ id: String) -> [String] { els.filter { ident($0) == id }.compactMap(value) }
-
-        let total = values("usage-chart-header-value").first.flatMap(Self.seconds)
-        let legend = values("category-legend-screen-usage")
-        var categories: [DaySnapshot.Category] = []
-        var i = 0
-        while i + 1 < legend.count {
-            categories.append(.init(name: legend[i], seconds: Self.seconds(legend[i + 1])))
-            i += 2
+        func values(_ id: String, in list: [AXUIElement]) -> [String] {
+            list.filter { ident($0) == id }.compactMap(value)
         }
+        let total = values("usage-chart-header-value", in: els).first.flatMap(Self.seconds)
 
         var apps: [DaySnapshot.App] = []
         var web: [DaySnapshot.Web] = []
@@ -292,11 +351,24 @@ final class ScreenTimeReader {
             }
         }
 
+        // … dann Apples Kategorien.
+        try setListMode(Self.categoriesMode)
+        expandList()
+        var categories: [DaySnapshot.Category] = []
+        for el in all() {
+            guard let id = ident(el), id.hasPrefix("progress-bar-category:"), let d = desc(el) else { continue }
+            let (name, secs) = Self.nameAndSeconds(d)
+            categories.append(.init(id: String(id.dropFirst("progress-bar-category:".count)), name: name, seconds: secs))
+        }
+
         // Lieber keine Zahlen als falsche: in der Wochenansicht lägen einzelne
-        // Apps über der vermeintlichen Tagessumme.
-        let maxApp = apps.compactMap(\.seconds).max() ?? 0
-        if let total, maxApp > total + 60 {
-            throw ScreenTimeReaderError.implausible("App \(maxApp) s über Tagessumme \(total) s")
+        // Einträge über der vermeintlichen Tagessumme.
+        let maxEntry = (apps.compactMap(\.seconds) + categories.compactMap(\.seconds)).max() ?? 0
+        if let total, maxEntry > total + 60 {
+            throw ScreenTimeReaderError.implausible("Eintrag \(maxEntry) s über Tagessumme \(total) s")
+        }
+        if let total, total >= 120, categories.isEmpty {
+            throw ScreenTimeReaderError.implausible("\(total / 60) min Nutzung, aber keine Kategorien")
         }
 
         let device = els.first { role($0) == "AXPopUpButton" && ident($0) == nil }.flatMap(value) ?? "?"
@@ -305,11 +377,11 @@ final class ScreenTimeReader {
 
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd"
-        log("Gelesen: \(label) – \(apps.count) Apps, gesamt \(total.map { "\($0 / 60) min" } ?? "?")")
+        log("\(child): \(label) – \(apps.count) Apps, \(categories.count) Kategorien, gesamt \(total.map { "\($0 / 60) min" } ?? "?")")
         return DaySnapshot(
-            date: f.string(from: day), label: label, appleUpdated: updated, device: device,
+            child: child, date: f.string(from: day), label: label, appleUpdated: updated, device: device,
             totalSeconds: total, apps: apps, web: web, categories: categories,
-            pickups: values("activity-legend-pickups"),
+            pickups: values("activity-legend-pickups", in: els),
             readAt: ISO8601DateFormatter().string(from: Date()))
     }
 
@@ -376,18 +448,20 @@ final class ScreenTimeReader {
         return (attr(appEl, kAXWindowsAttribute) as? [AXUIElement]) ?? []
     }
 
-    /// Alle Elemente in Dokumentreihenfolge -- die Reihenfolge ordnet
-    /// Beschriftungen und Werte einander zu.
-    private func all() -> [AXUIElement] {
+    /// Elemente in Dokumentreihenfolge -- die Reihenfolge ordnet Beschriftungen
+    /// und Werte einander zu.
+    private func flatten(_ roots: [AXUIElement]) -> [AXUIElement] {
         var out: [AXUIElement] = []
         func walk(_ el: AXUIElement, _ depth: Int) {
             if out.count >= 60_000 || depth > 80 { return }
             out.append(el)
             for k in (attr(el, kAXChildrenAttribute) as? [AXUIElement]) ?? [] { walk(k, depth + 1) }
         }
-        for w in windows() { walk(w, 0) }
+        for r in roots { walk(r, 0) }
         return out
     }
+
+    private func all() -> [AXUIElement] { flatten(windows()) }
 
     private func first(id: String) -> AXUIElement? { all().first { ident($0) == id } }
 

@@ -11,18 +11,17 @@ struct MenuContentView: View {
     var body: some View {
         Text(statusLine)
 
-        if let status = runner.status, status.date == todayKey {
-            Text("Heute: \(runner.format(status.totalMinutes))")
-            if !status.byDevice.isEmpty {
-                ForEach(status.byDevice.sorted(by: { $0.value > $1.value }), id: \.key) { name, minutes in
-                    Text("   \(name): \(runner.format(minutes))")
+        let today = runner.orderedStatuses.filter { $0.status.date == todayKey }
+        if today.isEmpty {
+            Text("Noch keine Daten für heute")
+        } else {
+            ForEach(today, id: \.child) { entry in
+                if entry.status.topApp != "-" && !entry.status.topApp.isEmpty {
+                    Text("\(entry.child): \(runner.format(entry.status.totalMinutes)) · Top: \(entry.status.topApp) (\(runner.format(entry.status.topAppMinutes)))")
+                } else {
+                    Text("\(entry.child): \(runner.format(entry.status.totalMinutes))")
                 }
             }
-            if status.topApp != "-" && !status.topApp.isEmpty {
-                Text("Top: \(status.topApp) (\(runner.format(status.topAppMinutes)))")
-            }
-        } else {
-            Text("Noch keine Daten für heute")
         }
 
         if !ScreenTimeReader.isTrusted {
