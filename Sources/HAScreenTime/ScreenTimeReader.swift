@@ -73,6 +73,10 @@ final class ScreenTimeReader {
     private var appEl: AXUIElement?
     private var settingsApp: NSRunningApplication?
     private var launchedByUs = false
+    /// Letzter gespeicherter Stand je Kind und Tag (Schlüssel `previousKey`).
+    private var previous: [String: DaySnapshot] = [:]
+
+    static func previousKey(_ child: String, _ date: String) -> String { "\(child)|\(date)" }
 
     init(log: @escaping (String) -> Void) {
         self.log = log
@@ -87,11 +91,14 @@ final class ScreenTimeReader {
     }
 
     /// Liest je Kind die angegebenen Tage (0 = heute, 1 = gestern, …).
+    /// `previous` ist der zuletzt gespeicherte Stand je Kind und Tag.
     ///
     /// Scheitert ein Kind, bekommt nur dieses einen Fehler, die anderen werden
     /// trotzdem gelesen. Nur Probleme, die alle betreffen (Berechtigung,
     /// Systemeinstellungen in Benutzung), werfen.
-    func read(_ plan: [(child: String, dayOffsets: [Int])]) throws -> [String: Result<[DaySnapshot], Error>] {
+    func read(_ plan: [(child: String, dayOffsets: [Int])],
+              previous: [String: DaySnapshot] = [:]) throws -> [String: Result<[DaySnapshot], Error>] {
+        self.previous = previous
         guard Self.isTrusted else { throw ScreenTimeReaderError.notTrusted }
         // Sind die Systemeinstellungen schon offen, benutzt sie vermutlich
         // gerade jemand -- dann nicht fernsteuern, lieber einen Lauf auslassen.
@@ -133,8 +140,6 @@ final class ScreenTimeReader {
                 break
             }
         }
-        // Die Ansicht so hinterlassen, wie man sie von Hand vorfindet.
-        try? setListMode(Self.appsMode)
         return snapshots
     }
 
@@ -320,8 +325,30 @@ final class ScreenTimeReader {
         let day = Calendar.current.date(byAdding: .day, value: -offset, to: Date())!
         let dayOfMonth = Calendar.current.component(.day, from: day)
 
-        // Erst die Apps …
-        try setListMode(Self.appsMode)
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        let date = f.string(from: day)
+        let groupPrefix = "progress-bar-timeAllowanceGroup:"
+        func readAllowances() -> [DaySnapshot.Allowance] {
+            expandList()
+            return all().compactMap { el in
+                guard let id = ident(el), id.hasPrefix(groupPrefix), let d = desc(el) else { return nil }
+                let (name, secs) = Self.nameAndSeconds(d)
+                return .init(id: String(id.dropFirst(groupPrefix.count)), name: name, seconds: secs)
+            }
+        }
+
+        // Jedes Aufklappen des Menüs „Darstellungsoptionen“ zieht kurz den
+        // Tastaturfokus von der Arbeit am Mac ab. Deshalb zuerst lesen, was
+        // gerade eingestellt ist, und höchstens einmal umschalten; die Ansicht
+        // bleibt danach für das nächste Kind so stehen.
+        var allowances: [DaySnapshot.Allowance]?
+        var reused = false
+        if first(id: "most-used-item-type-picker").flatMap(value) == Self.allowancesMode {
+            allowances = readAllowances()
+            try setListMode(Self.appsMode)
+        }
+
         expandList()
         let els = all()
         let label = dateLabel(in: els)
@@ -333,6 +360,9 @@ final class ScreenTimeReader {
         guard !label.lowercased().contains("durchschnitt"),
               els.first(where: { ident($0) == "day-picker-segment" }).flatMap(value) == "1" else {
             throw ScreenTimeReaderError.wrongView("nicht in der Tagesansicht (\(label))")
+        }
+        guard first(id: "most-used-item-type-picker").flatMap(value) == Self.appsMode else {
+            throw ScreenTimeReaderError.wrongView("Liste zeigt nicht „\(Self.appsMode)“")
         }
 
         func values(_ id: String, in list: [AXUIElement]) -> [String] {
@@ -353,24 +383,29 @@ final class ScreenTimeReader {
             }
         }
 
-        // … dann die Nutzungszeiten.
-        try setListMode(Self.allowancesMode)
-        expandList()
-        var allowances: [DaySnapshot.Allowance] = []
-        let groupPrefix = "progress-bar-timeAllowanceGroup:"
-        for el in all() {
-            guard let id = ident(el), id.hasPrefix(groupPrefix), let d = desc(el) else { continue }
-            let (name, secs) = Self.nameAndSeconds(d)
-            allowances.append(.init(id: String(id.dropFirst(groupPrefix.count)), name: name, seconds: secs))
+        if allowances == nil {
+            // Die Nutzungszeiten ergeben zusammen die Gesamtzeit. Ist die seit dem
+            // letzten Lauf gleich geblieben, gelten auch die alten Nutzungszeiten.
+            let prev = previous[Self.previousKey(child, date)]
+            if total == 0 {
+                allowances = []
+            } else if let prev, let total, prev.totalSeconds == total, !prev.allowances.isEmpty {
+                allowances = prev.allowances
+                reused = true
+            } else {
+                try setListMode(Self.allowancesMode)
+                allowances = readAllowances()
+            }
         }
+        let allowanceList = allowances ?? []
 
         // Lieber keine Zahlen als falsche: in der Wochenansicht lägen einzelne
         // Einträge über der vermeintlichen Tagessumme.
-        let maxEntry = (apps.compactMap(\.seconds) + allowances.compactMap(\.seconds)).max() ?? 0
+        let maxEntry = (apps.compactMap(\.seconds) + allowanceList.compactMap(\.seconds)).max() ?? 0
         if let total, maxEntry > total + 60 {
             throw ScreenTimeReaderError.implausible("Eintrag \(maxEntry) s über Tagessumme \(total) s")
         }
-        if let total, total >= 120, allowances.isEmpty {
+        if let total, total >= 120, allowanceList.isEmpty {
             throw ScreenTimeReaderError.implausible("\(total / 60) min Nutzung, aber keine Nutzungszeiten")
         }
 
@@ -378,12 +413,10 @@ final class ScreenTimeReader {
         let updated = els.compactMap { role($0) == "AXStaticText" ? value($0) : nil }
             .first { $0.contains("aktualisiert") }
 
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        log("\(child): \(label) – \(apps.count) Apps, \(allowances.count) Nutzungszeiten, gesamt \(total.map { "\($0 / 60) min" } ?? "?")")
+        log("\(child): \(label) – \(apps.count) Apps, \(allowanceList.count) Nutzungszeiten\(reused ? " (unverändert)" : ""), gesamt \(total.map { "\($0 / 60) min" } ?? "?")")
         return DaySnapshot(
-            child: child, date: f.string(from: day), label: label, appleUpdated: updated, device: device,
-            totalSeconds: total, apps: apps, web: web, allowances: allowances,
+            child: child, date: date, label: label, appleUpdated: updated, device: device,
+            totalSeconds: total, apps: apps, web: web, allowances: allowanceList,
             pickups: values("activity-legend-pickups", in: els),
             readAt: ISO8601DateFormatter().string(from: Date()))
     }

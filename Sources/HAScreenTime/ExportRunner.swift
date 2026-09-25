@@ -234,8 +234,24 @@ final class ExportRunner: ObservableObject {
         let dayCount = plan.map(\.dayOffsets.count).reduce(0, +)
         log.appendSystem("Lese Bildschirmzeit: \(children.joined(separator: ", ")) (\(dayCount) Tage)")
 
+        // Der letzte Stand je Tag: ist die Gesamtzeit unveraendert, uebernimmt der
+        // Leser die Nutzungszeiten daraus, statt das Menue dafuer aufzuklappen.
+        let dec = JSONDecoder()
+        dec.keyDecodingStrategy = .convertFromSnakeCase
+        var previous: [String: DaySnapshot] = [:]
+        for (child, offsets) in plan {
+            for off in offsets {
+                let key = Self.dayKey(offset: off)
+                if let data = try? Data(contentsOf: Self.dayFile(child, key)),
+                   let snap = try? dec.decode(DaySnapshot.self, from: data) {
+                    previous[ScreenTimeReader.previousKey(child, key)] = snap
+                }
+            }
+        }
+        let known = previous
+
         let outcome: Result<[String: Result<[DaySnapshot], Error>], Error> = await Task.detached(priority: .utility) {
-            Result { try ScreenTimeReader(log: logSink).read(plan) }
+            Result { try ScreenTimeReader(log: logSink).read(plan, previous: known) }
         }.value
 
         var diag: [String: Any] = [
