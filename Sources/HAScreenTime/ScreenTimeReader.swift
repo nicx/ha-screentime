@@ -110,8 +110,17 @@ final class ScreenTimeReader {
 
         var results: [String: Result<[DaySnapshot], Error>] = [:]
         for (child, offsets) in plan {
-            results[child] = Result { try readChild(child, dayOffsets: offsets) }
+            var result = Result { try readChild(child, dayOffsets: offsets) }
             closeSheets()
+            // Lädt eine Ansicht einmal nicht rechtzeitig (Apple holt die Daten
+            // vom Server), klappt es beim zweiten Anlauf meist.
+            if case .failure(let error) = result {
+                log("\(child): \(error.localizedDescription) – neuer Versuch")
+                pause(2)
+                result = Result { try readChild(child, dayOffsets: offsets) }
+                closeSheets()
+            }
+            results[child] = result
         }
         return results
     }

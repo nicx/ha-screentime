@@ -50,6 +50,8 @@ final class ExportRunner: ObservableObject {
     private let settings: AppSettings
     private let log: LogStore
     private let notifier: Notifier
+    /// Läufe in Folge, in denen ein Kind nicht gelesen werden konnte.
+    private var readFailureStreak = 0
 
     private var scheduler: NSBackgroundActivityScheduler?
     private var activityToken: NSObjectProtocol?
@@ -293,10 +295,16 @@ final class ExportRunner: ObservableObject {
             diag["kinder"] = kinder
             if problems.isEmpty {
                 UserDefaults.standard.set(Date(), forKey: Self.lastReadSuccessKey)
+                readFailureStreak = 0
                 notifier.report(ScreenTimeConditions.read, healthy: true)
             } else {
                 diag["hard_error"] = true
-                notifier.report(ScreenTimeConditions.read, healthy: false, detail: problems.joined(separator: "\n"))
+                // Ein einzelner Aussetzer ist kein Grund für eine Mail; erst
+                // wenn auch der nächste Lauf scheitert.
+                readFailureStreak += 1
+                if readFailureStreak >= 2 {
+                    notifier.report(ScreenTimeConditions.read, healthy: false, detail: problems.joined(separator: "\n"))
+                }
             }
         case .failure(let error):
             let message = error.localizedDescription
