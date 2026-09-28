@@ -135,7 +135,14 @@ final class ScreenTimeReader {
 
         var snapshots: [DaySnapshot] = []
         var current = 0
-        for offset in Set(dayOffsets).sorted() {
+        // Hat noch kein Gerät des Kindes etwas für heute gemeldet, bleibt die
+        // Ansicht trotz „Heute“ beim Vortag stehen (so am 28.09. von Mitternacht
+        // bis zur ersten Nutzung). Dann gibt es für heute schlicht noch nichts.
+        if let label = dateLabel(), !Self.label(label, shows: 0), Self.label(label, shows: 1) {
+            log("\(child): für heute noch keine Daten bei Apple (Ansicht zeigt „\(label)“)")
+            current = 1
+        }
+        for offset in Set(dayOffsets).sorted() where offset >= current {
             do {
                 while current < offset {
                     try stepBack()
@@ -361,9 +368,7 @@ final class ScreenTimeReader {
         expandList()
         let els = all()
         let label = dateLabel(in: els)
-        // Das Datum steht als "…, 24. September" in der Beschriftung; die
-        // Ziffer davor darf keine weitere sein, sonst passte "4." auch auf "24.".
-        guard let label, label.range(of: "(?<!\\d)\(dayOfMonth)\\.", options: .regularExpression) != nil else {
+        guard let label, Self.label(label, shows: offset) else {
             throw ScreenTimeReaderError.wrongView("erwartet Tag \(dayOfMonth), angezeigt „\(label ?? "?")“")
         }
         guard !label.lowercased().contains("durchschnitt"),
@@ -440,6 +445,15 @@ final class ScreenTimeReader {
     }
 
     // MARK: - Zeitangaben
+
+    /// Zeigt die Datumsbeschriftung ("…, 24. September") den Tag `offset` Tage
+    /// vor heute? Vor der Ziffer darf keine weitere stehen, sonst passte "4."
+    /// auch auf "24.".
+    static func label(_ label: String, shows offset: Int) -> Bool {
+        let day = Calendar.current.date(byAdding: .day, value: -offset, to: Date())!
+        let dayOfMonth = Calendar.current.component(.day, from: day)
+        return label.range(of: "(?<!\\d)\(dayOfMonth)\\.", options: .regularExpression) != nil
+    }
 
     /// "1h 5min", "29min", "53s", "27 Minuten", "2 Std. 3 Min." → Sekunden
     static func seconds(_ s: String) -> Int? {
