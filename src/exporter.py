@@ -5,6 +5,7 @@ Exports data to Home Assistant and InfluxDB
 """
 
 import csv
+import time
 import json
 import os
 import sys
@@ -468,27 +469,38 @@ def update_ha_sensor(entity_id: str, state: any, attributes: dict = None,
         payload["attributes"]["state_class"] = state_class
     payload["attributes"]["last_updated"] = datetime.now().isoformat()
 
-    try:
-        response = requests.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {HA_TOKEN}",
-                "Content-Type": "application/json"
-            },
-            json=payload,
-            timeout=10
-        )
+    # HA antwortet gelegentlich rund 10 s lang nicht (dann laeuft ein Push ins
+    # Leere, alle folgenden gehen sofort durch). Das Setzen eines Zustands ist
+    # gefahrlos wiederholbar, also lieber noch einmal versuchen als den Lauf
+    # scheitern zu lassen.
+    for attempt in (1, 2, 3):
+        started = time.monotonic()
+        try:
+            response = requests.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {HA_TOKEN}",
+                    "Content-Type": "application/json"
+                },
+                json=payload,
+                timeout=20
+            )
+        except requests.exceptions.RequestException as e:
+            waited = time.monotonic() - started
+            print(f"[HA] Connection error ({entity_id}, Versuch {attempt}, nach {waited:.1f} s): {e}")
+            if attempt == 3:
+                return False
+            time.sleep(2)
+            continue
 
         if response.status_code in [200, 201]:
-            print(f"[HA] {entity_id} = {state}")
+            waited = time.monotonic() - started
+            note = f" (nach Versuch {attempt}, {waited:.1f} s)" if attempt > 1 else ""
+            print(f"[HA] {entity_id} = {state}{note}")
             return True
-        else:
-            print(f"[HA] Error {response.status_code} for {entity_id}: {response.text[:100]}")
-            return False
-
-    except Exception as e:
-        print(f"[HA] Connection error: {e}")
+        print(f"[HA] Error {response.status_code} for {entity_id}: {response.text[:100]}")
         return False
+    return False
 
 
 def export_to_homeassistant(rows: list[dict]) -> bool:
