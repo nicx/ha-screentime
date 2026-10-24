@@ -135,12 +135,14 @@ final class ScreenTimeReader {
 
         var snapshots: [DaySnapshot] = []
         var current = 0
-        // Hat noch kein Gerät des Kindes etwas für heute gemeldet, bleibt die
-        // Ansicht trotz „Heute“ beim Vortag stehen (so am 28.09. von Mitternacht
-        // bis zur ersten Nutzung). Dann gibt es für heute schlicht noch nichts.
-        if let label = dateLabel(), !Self.label(label, shows: 0), Self.label(label, shows: 1) {
-            log("\(child): für heute noch keine Daten bei Apple (Ansicht zeigt „\(label)“)")
-            current = 1
+        // Hat seit einiger Zeit kein Gerät des Kindes etwas gemeldet, bleibt die
+        // Ansicht trotz „Heute“ beim letzten Tag mit Daten stehen (über Nacht der
+        // Vortag, bei längerer Pause auch Tage davor). Dann gibt es für die Tage
+        // dazwischen schlicht nichts, und es wird ab dem angezeigten Tag gelesen.
+        if let label = dateLabel(), !Self.label(label, shows: 0),
+           let shown = (1...20).first(where: { Self.label(label, shows: $0) }) {
+            log("\(child): seit \(shown) Tag(en) keine Daten bei Apple (Ansicht zeigt „\(label)“)")
+            current = shown
         }
         for offset in Set(dayOffsets).sorted() where offset >= current {
             do {
