@@ -348,6 +348,11 @@ final class ScreenTimeReader {
         let date = f.string(from: day)
         let groupPrefix = "progress-bar-timeAllowanceGroup:"
         func readAllowances() -> [DaySnapshot.Allowance] {
+            // Nach dem Umschalten laden die Balken erst einen Moment später; zu
+            // früh gelesen ist die Liste leer.
+            _ = waitFor("Nutzungszeiten", timeout: 8) {
+                self.all().first { (self.ident($0) ?? "").hasPrefix(groupPrefix) }
+            }
             expandList()
             return all().compactMap { el in
                 guard let id = ident(el), id.hasPrefix(groupPrefix), let d = desc(el) else { return nil }
