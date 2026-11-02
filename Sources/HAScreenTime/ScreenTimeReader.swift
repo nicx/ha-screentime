@@ -139,7 +139,9 @@ final class ScreenTimeReader {
         // Ansicht trotz „Heute“ beim letzten Tag mit Daten stehen (über Nacht der
         // Vortag, bei längerer Pause auch Tage davor). Dann gibt es für die Tage
         // dazwischen schlicht nichts, und es wird ab dem angezeigten Tag gelesen.
-        if let label = dateLabel(), !Self.label(label, shows: 0),
+        // Eine Wochenbeschriftung („5.–11. Okt. Durchschnitt“) nennt Tageszahlen,
+        // zeigt aber keinen Tag.
+        if let label = dateLabel(), !label.lowercased().contains("durchschnitt"), !Self.label(label, shows: 0),
            let shown = (1...20).first(where: { Self.label(label, shows: $0) }) {
             log("\(child): seit \(shown) Tag(en) keine Daten bei Apple (Ansicht zeigt „\(label)“)")
             current = shown
@@ -382,8 +384,10 @@ final class ScreenTimeReader {
               els.first(where: { ident($0) == "day-picker-segment" }).flatMap(value) == "1" else {
             throw ScreenTimeReaderError.wrongView("nicht in der Tagesansicht (\(label))")
         }
-        guard first(id: "most-used-item-type-picker").flatMap(value) == Self.appsMode else {
-            throw ScreenTimeReaderError.wrongView("Liste zeigt nicht „\(Self.appsMode)“")
+        // Ohne jede Nutzung zeigt Apple weder Liste noch Auswahlmenü, nur einen
+        // Hinweistext. Ist das Menü da, muss es auf den Apps stehen.
+        if let mode = first(id: "most-used-item-type-picker").flatMap(value), mode != Self.appsMode {
+            throw ScreenTimeReaderError.wrongView("Liste zeigt „\(mode)“ statt „\(Self.appsMode)“")
         }
 
         func values(_ id: String, in list: [AXUIElement]) -> [String] {
